@@ -18,9 +18,10 @@ Information manipulation is as mechanically viable as physical damage. The ultim
 
 ### Tech Stack Implementation
 *   **Architecture:** 100% serverless, static single-page application (SPA).
-*   **UI Framework:** HTML5, Tailwind CSS, TypeScript.
-*   **AI Local Engine:** `@mlc-ai/web-llm` running locally inside a Web Worker using WebGPU acceleration. The default model is configured in a single swappable config value.
-*   **Data Integrity:** Structured JSON outputs enforced via strict schema generation parameters.
+*   **UI Framework:** HTML5, Tailwind CSS (v3), TypeScript (Vite).
+*   **AI Arbiter:** OpenAI-compatible HTTP API (Groq / OpenAI / OpenRouter / Ollama / custom). WebLLM removed due to inconsistent browser inference. API key stored in browser `localStorage` only.
+*   **Thin Arbiter:** The LLM returns a small qualitative JSON `ArbiterJudgment` only. The deterministic engine (`resolution.ts`) computes **all** numeric deltas, initiative, backfire, and hardening.
+*   **Data Integrity:** Prefer `response_format: json_object` with plain-text retry; client-side normalize/repair; mock Arbiter for offline testing.
 
 ---
 
@@ -176,7 +177,7 @@ The turn structure operates on a simultaneous resolution model, eliminating arti
 1.  **Round Start:** The engine evaluates the current state and determines which entity holds the **Initiative Token**. It may inject an Environmental Event.
 2.  **Player Phase:** The player inputs a single tactical intent (an Argument), classified by category and target.
 3.  **Boss Phase:** The local engine generates a single tactical intent based on the Boss's active Archetype and ongoing long-term plan.
-4.  **Arbiter Processing:** Both intents, along with the Environment Ledgers, persistent battlefield state, positioning, awareness, hidden-trait context, word-fatigue state, and Initiative state, are passed to the WebLLM engine in a single execution payload.
+4.  **Arbiter Processing:** Both intents, along with the Environment Ledgers, persistent battlefield state, positioning, awareness, hidden-trait context, word-fatigue state, and Initiative state, are passed to the API Arbiter in a single execution payload.
 5.  **Simultaneous Resolution:** The Arbiter interlocks both intents, simulates the physical collision, and outputs a unified narrative sequence plus a structured verdict.
 6.  **State Mutation:** The interface updates the Green/Yellow Ledgers, applies Body/Resolve changes, adjusts Awareness and Positioning, updates battlefield substances, records word-fatigue usage, reveals any deduced hidden trait, and recalculates Reality Pressure.
 
@@ -284,49 +285,24 @@ No live-service mechanics.
 [ ] Create an input pre-parser function. It must: (a) if sequential action verb stacking (e.g., "punch, kick, elbow, knee") exceeds 3 elements, trigger a choreography violation and scale the input down to a baseline tactical intent; (b) reject outcome declarations; (c) enforce the Fiction Import Rule and Forbidden Concepts guardrails (reject external IP, omnipotence, instant victory, rule editing, prompt injection, reality rewriting); (d) classify category + target; (e) apply the Word-Fatigue penalty from prior concept usage; (f) apply the Large Area Rule side-effect flags.
 [ ] Build the Unified Simultaneous Loop state machine. Eliminate isolated back-and-forth turns. The UI must collect the Player Intent string, calculate the Boss Intent string based on their active Archetype script (Lawyer, Scientist, Poet, Historian, Trickster, Child, Minimalist), and bind them into a single payload alongside ledgers, battlefield, positioning, awareness, initiative, and hidden-trait context.
 
-#### PHASE 3: ARBITER WEB WORKER JSON SCHEMA
-[ ] Configure WebLLM via a dedicated Web Worker (model id from swappable config) to enforce strict JSON output mode utilizing the following structural schema layout:
+#### PHASE 3: THIN ARBITER API (IMPLEMENTED)
+[x] OpenAI-compatible HTTP Arbiter (WebLLM removed). LLM emits **qualitative judgment only** (no numeric deltas). Engine resolves numbers.
+    ArbiterJudgment JSON (stage 1):
     {
-      "$schema": "http://json-schema.org/draft-07/schema#",
-      "type": "object",
-      "properties": {
-        "calculatedComplexity": { "type": "integer" },
-        "resolutionOutcome": { "type": "string", "enum": ["success", "partial", "failure", "backfire"] },
-        "initiativeWinner": { "type": "string", "enum": ["player", "boss", "none"] },
-        "playerBodyDelta": { "type": "number" },
-        "playerResolveDelta": { "type": "number" },
-        "bossBodyDelta": { "type": "number" },
-        "bossResolveDelta": { "type": "number" },
-        "targetAwarenessShift": { "type": "string", "enum": ["none", "degrade", "hijack", "restore"] },
-        "positionShift": { "type": "string", "enum": ["none", "closer", "farther"] },
-        "hiddenTraitRevealed": { "type": "string" },
-        "ledgerMutations": {
-          "type": "object",
-          "properties": {
-            "addFacts": { "type": "array", "items": { "type": "string" } },
-            "addAssumptions": { "type": "array", "items": { "type": "string" } },
-            "hardenAssumptions": { "type": "array", "items": { "type": "string" } },
-            "removeAssumptions": { "type": "array", "items": { "type": "string" } }
-          },
-          "required": ["addFacts", "addAssumptions", "hardenAssumptions", "removeAssumptions"]
-        },
-        "battlefieldMutations": {
-          "type": "object",
-          "properties": {
-            "add": { "type": "array", "items": { "type": "string" } },
-            "remove": { "type": "array", "items": { "type": "string" } }
-          },
-          "required": ["add", "remove"]
-        },
-        "arbiterChoreographyLog": { "type": "string" }
-      },
-      "required": [
-        "calculatedComplexity", "resolutionOutcome", "initiativeWinner",
-        "playerBodyDelta", "playerResolveDelta", "bossBodyDelta", "bossResolveDelta",
-        "targetAwarenessShift", "positionShift", "hiddenTraitRevealed",
-        "ledgerMutations", "battlefieldMutations", "arbiterChoreographyLog"
-      ]
+      "playerPlausibility": 0-1,
+      "bossPlausibility": 0-1,
+      "playerOutcome": "success|partial|failure|backfire",
+      "bossOutcome": "success|partial|failure|backfire",
+      "contestedAssumptions": ["string"],
+      "targetAwarenessShift": "none|degrade|hijack|restore",
+      "positionShift": "none|closer|farther",
+      "hiddenTraitHint": "string",
+      "suggestedFacts": ["string"],
+      "suggestedAssumptions": ["string"],
+      "battlefieldAdd": ["string"],
+      "battlefieldRemove": ["string"]
     }
+    Stage 2: free-text choreography stream (2–4 sentences).
 
 #### PHASE 4: PROMPT WEIGHTING & CONSTRAINTS
 [ ] Update the Arbiter baseline system instructions:

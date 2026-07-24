@@ -62,3 +62,12 @@ _(This list grows over time via the Knowledge Loop. Add new global rules here as
 
 - Keep all detailed documentation under `agentMap/`.
 - Keep docs in sync with code on every change — no stale docs.
+- **Emergent tactics:** Language is the controller. Outthinking each other matters more than “best sentence.”
+- **Dilemma-first:** Every turn creates or solves a field problem. Bosses advance a goal with visible tools/methods — never soft-loop observation, never “I cut X” with no *with what*.
+- **Show, don’t advise:** Foreshadow with battlefield signs (`⚠ Damaged Railing (3)` + groans). Never “choose between…”.
+- Damage must be narratively obvious (“beam clips your shoulder”), not unexplained numbers.
+- Stack: Vite + TypeScript + Tailwind CSS (v3). Client-side SPA; no game server.
+- **Thin Arbiter via OpenAI-compatible API** (Groq / OpenAI / OpenRouter / Ollama / custom). WebLLM is **not** used. API config in `localStorage`. Mock Arbiter for offline.
+- **Thin Arbiter:** the LLM returns qualitative `ArbiterJudgment` only; `src/engine/resolution.ts` computes all numeric deltas. Never let the model invent body/resolve numbers.
+- **UI:** Boot modal (API config + boss + how-to-play); arena = boss top-left, player bottom-right, Arbiter mid-left with speech bubbles, env/facts mid-right, chat bottom-center, **arena cards** table (matrix theme).
+- Source layout: `src/config`, `src/types`, `src/engine`, `src/arbiter`, `src/ui`. Detailed design lives in `agentMap/BLUEPRINT.MD`.
