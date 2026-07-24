@@ -1,4 +1,14 @@
-import type { ArbiterJudgment, CompactGameSnapshot, ResolutionOutcome } from '../types';
+import type {
+  ActorSide,
+  ArbiterJudgment,
+  CompactGameSnapshot,
+  DiscoveryResult,
+  ObservableSignal,
+  PlanRelation,
+  ResolutionOutcome,
+} from '../types';
+import { createTempoState } from '../engine/tempo';
+import { getBossPersonality } from '../engine/bossPersonalities';
 import {
   buildHelpSystemPrompt,
   buildHelpUserPrompt,
@@ -20,6 +30,24 @@ function isOutcome(v: unknown): v is ResolutionOutcome {
   );
 }
 
+function isRelation(v: unknown): v is PlanRelation {
+  return (
+    v === 'advance' ||
+    v === 'stall' ||
+    v === 'break' ||
+    v === 'reverse' ||
+    v === 'transfer' ||
+    v === 'none'
+  );
+}
+
+function outcomeFromPlausibility(p: number): ResolutionOutcome {
+  if (p > 0.72) return 'success';
+  if (p > 0.5) return 'partial';
+  if (p > 0.28) return 'failure';
+  return 'backfire';
+}
+
 function normalizeJudgment(raw: unknown): ArbiterJudgment {
   if (!raw || typeof raw !== 'object') {
     throw new Error('Invalid judgment object');
@@ -30,18 +58,70 @@ function normalizeJudgment(raw: unknown): ArbiterJudgment {
 
   const playerP = Number(o.playerPlausibility);
   const bossP = Number(o.bossPlausibility);
+  const pPlaus = Math.max(0, Math.min(1, Number.isFinite(playerP) ? playerP : 0.55));
+  const bPlaus = Math.max(0, Math.min(1, Number.isFinite(bossP) ? bossP : 0.55));
+
+  // Missing outcomes: repair from plausibility — do NOT default everything to partial.
+  const playerOutcome = isOutcome(o.playerOutcome)
+    ? o.playerOutcome
+    : outcomeFromPlausibility(pPlaus);
+  const bossOutcome = isOutcome(o.bossOutcome)
+    ? o.bossOutcome
+    : outcomeFromPlausibility(bPlaus);
+
+  const discoveries: DiscoveryResult[] = Array.isArray(o.discoveries)
+    ? o.discoveries
+        .filter((d): d is Record<string, unknown> => !!d && typeof d === 'object')
+        .map((d) => ({
+          stimulus: typeof d.stimulus === 'string' ? d.stimulus : '',
+          finding: typeof d.finding === 'string' ? d.finding : '',
+          property: typeof d.property === 'string' ? d.property : undefined,
+          disproved: typeof d.disproved === 'string' ? d.disproved : undefined,
+        }))
+        .filter((d) => d.finding)
+    : [];
+
+  const observableSignals: ObservableSignal[] = Array.isArray(o.observableSignals)
+    ? o.observableSignals
+        .filter((s): s is Record<string, unknown> => !!s && typeof s === 'object')
+        .map((s) => ({
+          kind: typeof s.kind === 'string' ? s.kind : 'signal',
+          description: typeof s.description === 'string' ? s.description : '',
+          strength: Number.isFinite(Number(s.strength)) ? Number(s.strength) : 0.5,
+        }))
+        .filter((s) => s.description)
+    : [];
+
+  const causalEvents = Array.isArray(o.causalEvents)
+    ? o.causalEvents
+        .filter((e): e is Record<string, unknown> => !!e && typeof e === 'object')
+        .map((e) => ({
+          actor: (e.actor === 'player' || e.actor === 'boss' || e.actor === 'world'
+            ? e.actor
+            : 'boss') as ActorSide,
+          method: typeof e.method === 'string' ? e.method : '',
+          target: typeof e.target === 'string' ? e.target : '',
+          fromState: typeof e.fromState === 'string' ? e.fromState : undefined,
+          toState: typeof e.toState === 'string' ? e.toState : undefined,
+          relation: isRelation(e.relation) ? e.relation : undefined,
+          narrative: typeof e.narrative === 'string' ? e.narrative : '',
+        }))
+        .filter((e) => e.narrative || e.method)
+    : undefined;
+
+  const transfer = o.threadTransferTo;
+  const threadTransferTo =
+    transfer === 'player' || transfer === 'boss' || transfer === 'world'
+      ? transfer
+      : null;
 
   return {
-    playerPlausibility: Math.max(
-      0,
-      Math.min(1, Number.isFinite(playerP) ? playerP : 0.5),
-    ),
-    bossPlausibility: Math.max(
-      0,
-      Math.min(1, Number.isFinite(bossP) ? bossP : 0.5),
-    ),
-    playerOutcome: isOutcome(o.playerOutcome) ? o.playerOutcome : 'partial',
-    bossOutcome: isOutcome(o.bossOutcome) ? o.bossOutcome : 'partial',
+    playerPlausibility: pPlaus,
+    bossPlausibility: bPlaus,
+    playerOutcome,
+    bossOutcome,
+    playerRelation: isRelation(o.playerRelation) ? o.playerRelation : undefined,
+    bossRelation: isRelation(o.bossRelation) ? o.bossRelation : undefined,
     contestedAssumptions: arr(o.contestedAssumptions),
     targetAwarenessShift:
       o.targetAwarenessShift === 'degrade' ||
@@ -49,9 +129,14 @@ function normalizeJudgment(raw: unknown): ArbiterJudgment {
       o.targetAwarenessShift === 'restore'
         ? o.targetAwarenessShift
         : 'none',
+    awarenessTarget: o.awarenessTarget === 'player' ? 'player' : 'boss',
     positionShift:
       o.positionShift === 'closer' || o.positionShift === 'farther'
         ? o.positionShift
+        : 'none',
+    bossPositionShift:
+      o.bossPositionShift === 'closer' || o.bossPositionShift === 'farther'
+        ? o.bossPositionShift
         : 'none',
     hiddenTraitHint:
       typeof o.hiddenTraitHint === 'string' ? o.hiddenTraitHint : '',
@@ -59,6 +144,9 @@ function normalizeJudgment(raw: unknown): ArbiterJudgment {
     suggestedAssumptions: arr(o.suggestedAssumptions),
     battlefieldAdd: arr(o.battlefieldAdd),
     battlefieldRemove: arr(o.battlefieldRemove),
+    causalEvents,
+    discoveries,
+    observableSignals,
     judgmentNarrative:
       typeof o.judgmentNarrative === 'string' ? o.judgmentNarrative : '',
     bossReaction: typeof o.bossReaction === 'string' ? o.bossReaction : '',
@@ -71,12 +159,22 @@ function normalizeJudgment(raw: unknown): ArbiterJudgment {
         : [],
     activeThreat: normalizeThreat(o.activeThreat),
     clearThreat: o.clearThreat === true,
+    threadTransferTo,
+    signatureMomentId:
+      typeof o.signatureMomentId === 'string' ? o.signatureMomentId : null,
+    emotionalBeat: typeof o.emotionalBeat === 'string' ? o.emotionalBeat : '',
   };
 }
 
 function normalizeThreat(
   v: unknown,
-): { label: string; foreshadow: string; timer: number } | null {
+): {
+  label: string;
+  foreshadow: string;
+  timer: number;
+  purpose?: string;
+  payoff?: string;
+} | null {
   if (!v || typeof v !== 'object') return null;
   const t = v as Record<string, unknown>;
   if (typeof t.label !== 'string' || !t.label.trim()) return null;
@@ -90,6 +188,8 @@ function normalizeThreat(
     label: t.label.trim(),
     foreshadow,
     timer: Math.max(1, Math.min(4, Number(t.timer) || 3)),
+    purpose: typeof t.purpose === 'string' ? t.purpose : undefined,
+    payoff: typeof t.payoff === 'string' ? t.payoff : undefined,
   };
 }
 
@@ -115,11 +215,25 @@ export class ArbiterClient {
     if (!this.cfg || !configLooksReady(this.cfg)) {
       throw new Error('Configure API base URL, model, and key first.');
     }
+    const p = getBossPersonality('lawyer');
+    const committed = {
+      raw: 'I snap a chalk line across the wet floor and call it binding.',
+      category: 'SETUP' as const,
+      target: 'ENVIRONMENT' as const,
+    };
     const judgment = await this.judge({
       round: 0,
       initiative: 'player',
       realityPressure: 0.2,
       battlefield: ['Stone Pillars'],
+      fieldElements: [
+        {
+          name: 'Stone Pillars',
+          condition: 'present',
+          knownProperties: ['objects'],
+          scars: [],
+        },
+      ],
       facts: [],
       assumptions: [],
       player: {
@@ -136,30 +250,42 @@ export class ArbiterClient {
         position: 'MID',
         archetype: 'lawyer',
         agendaProgress: 0,
+        posture: 'continue',
+        definingFlaw: p.definingFlaw,
         personality: {
-          name: 'The Lawyer',
-          trait: 'Legal Precedent',
-          goal: 'Bind the arena under rules.',
-          motive: 'Trap via precedent.',
-          voice: 'Plain firm sentences.',
-          toolkit: ['chalk line', 'stamped seal'],
-          tactics: ['Cite rules simply'],
-          taboos: ['No legalese walls'],
-          sampleMoves: [
-            'I snap a chalk line across the wet floor and call it binding.',
-          ],
+          name: p.name,
+          trait: p.trait,
+          goal: p.goal,
+          motive: p.motive,
+          voice: p.voice,
+          toolkit: p.toolkit,
+          tactics: p.tactics,
+          taboos: p.taboos,
+          sampleMoves: p.sampleMoves,
+          biases: p.biases,
+          obsessions: p.obsessions,
+          prideRule: p.prideRule,
+          fear: p.fear,
+          habit: p.habit,
+          blindSpots: p.blindSpots,
+          breakingPoint: p.breakingPoint,
+          signatureMoments: p.signatureMoments,
         },
       },
+      committedBossIntent: committed,
       playerIntent: {
         raw: 'I test the connection with a cautious probe.',
         category: 'UTILITY',
         target: 'ENVIRONMENT',
       },
+      bossIntent: committed,
       playerFatiguePenalty: 0,
       bossFatiguePenalty: 0,
-      generateBossIntent: true,
+      generateBossIntent: false,
+      tempo: createTempoState(),
       tension: 'calm',
       recentBossIntents: [],
+      discoveries: [],
     });
     return `OK · outcomes ${judgment.playerOutcome}/${judgment.bossOutcome}`;
   }
@@ -169,9 +295,15 @@ export class ArbiterClient {
       system: buildJudgmentSystemPrompt(),
       user: buildJudgmentUserPrompt(snapshot),
       temperature: 0.45,
-      maxTokens: 1100,
+      maxTokens: 1400,
     });
-    return normalizeJudgment(parseJudgmentJson(content));
+    const judgment = normalizeJudgment(parseJudgmentJson(content));
+    // Enforce precommitment: never let the model replace the boss Argument.
+    const committed = snapshot.committedBossIntent?.raw?.trim();
+    if (committed) {
+      judgment.bossIntent = committed;
+    }
+    return judgment;
   }
 
   /** One player-style Argument suggestion that uses the current field. */

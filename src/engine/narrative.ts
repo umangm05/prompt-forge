@@ -5,7 +5,8 @@ import type {
   ResolutionOutcome,
   ResolvedVerdict,
 } from '../types';
-import { formatThreatSigns } from './threats';
+import { elementSummary } from './fieldElements';
+import { formatThreadSigns, formatThreatSigns } from './threats';
 
 function fmtDelta(before: number, after: number): string {
   const d = Math.round((after - before) * 10) / 10;
@@ -56,11 +57,23 @@ export function composeJudgmentDocument(opts: {
   const { story, before, after, verdict, damageWhy, fieldSigns } = opts;
   const happened = bullets(storyToBullets(story));
 
+  if (verdict.causalEvents.length) {
+    for (const e of verdict.causalEvents.slice(0, 3)) {
+      const line = `${e.actor}: ${e.narrative || e.method}`;
+      if (!happened.some((h) => h.includes(e.narrative.slice(0, 24)))) {
+        happened.push(`• ${line}`);
+      }
+    }
+  }
+
   const why = [
     damageWhy?.trim() || verdict.damageWhyPlayer,
+    (verdict.expectationBreak ?? after.lastExpectationBreak)
+      ? `Expectation break: they acted on "${(verdict.expectationBreak ?? after.lastExpectationBreak)!.beliefClaim}" — ${(verdict.expectationBreak ?? after.lastExpectationBreak)!.controlShift}`
+      : '',
     `Your Body ${fmtDelta(before.player.body, after.player.body)} · Resolve ${fmtDelta(before.player.resolve, after.player.resolve)}`,
     `Boss Body ${fmtDelta(before.boss.body, after.boss.body)} · Resolve ${fmtDelta(before.boss.resolve, after.boss.resolve)}`,
-    `${outcomeLabel(verdict.playerOutcome)} vs ${outcomeLabel(verdict.bossOutcome)}`,
+    `${outcomeLabel(verdict.playerOutcome)}/${verdict.playerRelation} vs ${outcomeLabel(verdict.bossOutcome)}/${verdict.bossRelation}`,
   ].filter(Boolean);
 
   const field: string[] = [];
@@ -73,21 +86,41 @@ export function composeJudgmentDocument(opts: {
   };
 
   for (const s of fieldSigns ?? []) pushField(s);
-  if (after.activeThreat) {
+  if (after.tacticalThread) {
+    for (const s of formatThreadSigns(after.tacticalThread)) pushField(s);
+  } else if (after.activeThreat) {
     for (const s of formatThreatSigns(after.activeThreat)) pushField(s);
   }
-  for (const b of after.world.battlefield) pushField(b);
+  for (const el of after.world.fieldElements.slice(0, 6)) {
+    pushField(elementSummary(el));
+  }
+  if (after.world.thresholds.some((t) => !t.triggered && t.progress > 0)) {
+    const omen = after.world.thresholds.find((t) => !t.triggered && t.progress > 0);
+    if (omen) pushField(`Omen — ${omen.label}: ${omen.omen}`);
+  }
+  if (after.world.lastTransformation) {
+    pushField(`Transformed: ${after.world.lastTransformation}`);
+  }
+  if (after.tempo) {
+    pushField(`Tempo: ${after.tempo.beat}`);
+  }
+  if (after.temptation) {
+    pushField(after.temptation.foreshadow);
+  }
+  for (const d of verdict.discoveries) {
+    pushField(`Learned: ${d.finding}`);
+  }
   if (!field.length) pushField('The arena holds its breath.');
 
   return [
     'What changed',
-    ...happened,
+    ...happened.slice(0, 7),
     '',
     'Why it hurt',
     ...bullets(why),
     '',
     'Battlefield',
-    ...bullets(field.slice(0, 8)),
+    ...bullets(field.slice(0, 10)),
   ].join('\n');
 }
 
@@ -97,6 +130,9 @@ export function defaultBossReaction(
 ): string {
   if (verdict.bossOutcome === 'backfire') {
     return 'Their tool slips.\n\nThey catch themselves.';
+  }
+  if (verdict.expectationBreak) {
+    return 'They freeze.\n\nThe read was wrong.\n\nThey reset too late.';
   }
   if (verdict.playerOutcome === 'success' && bossAfter.resolve < 40) {
     return 'They stumble.\n\nLook at you.\n\nSmile.\n\n"...Earned."';
@@ -121,8 +157,10 @@ export function enrichMockStory(
 ): string {
   return [
     `• Boss commits: ${bossRaw.slice(0, 100)}`,
-    `• Clash resolves ${verdict.playerOutcome} / ${verdict.bossOutcome}`,
-    `• The field carries a new mark`,
+    `• Clash resolves ${verdict.playerOutcome}/${verdict.playerRelation} · ${verdict.bossOutcome}/${verdict.bossRelation}`,
+    verdict.discoveries[0]
+      ? `• Discovery: ${verdict.discoveries[0].finding}`
+      : `• The field carries a new mark`,
   ].join('\n');
 }
 

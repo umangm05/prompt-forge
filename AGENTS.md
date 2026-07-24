@@ -63,9 +63,13 @@ _(This list grows over time via the Knowledge Loop. Add new global rules here as
 - Keep all detailed documentation under `agentMap/`.
 - Keep docs in sync with code on every change — no stale docs.
 - **Emergent tactics:** Language is the controller. Outthinking each other matters more than “best sentence.”
+- **Tactical information warfare:** Combat reshapes both the battlefield and the opponent’s beliefs. Bosses adapt from observables + fallible beliefs — never from private player text mid-clash.
+- **Commitment-first:** Boss commits before player input; Arbiter judges that committed clash.
 - **Dilemma-first:** Every turn creates or solves a field problem. Bosses advance a goal with visible tools/methods — never soft-loop observation, never “I cut X” with no *with what*.
-- **Show, don’t advise:** Foreshadow with battlefield signs (`⚠ Damaged Railing (3)` + groans). Never “choose between…”.
-- Damage must be narratively obvious (“beam clips your shoulder”), not unexplained numbers.
+- **Memorable moments:** Bosses have defining flaws and 2–4 signature moments; emotion and greed may override optimal play. Tempo varies (lull/pressure/rupture/aftermath).
+- **Show, don’t advise:** Foreshadow with battlefield signs (`⚠ Damaged Railing (3)` + groans). Never “choose between…”. Expose decision space; never enumerate decisions.
+- Damage must be narratively obvious (“beam clips your shoulder”), not unexplained numbers. Keyword mention does not clear a threat — only causal mutation does.
+- Experiments always teach; world thresholds are earned/deterministic (no random mid-fight injection).
 - Stack: Vite + TypeScript + Tailwind CSS (v3). Client-side SPA; no game server.
 - **Thin Arbiter via OpenAI-compatible API** (Groq / OpenAI / OpenRouter / Ollama / custom). WebLLM is **not** used. API config in `localStorage`. Mock Arbiter for offline.
 - **Thin Arbiter:** the LLM returns qualitative `ArbiterJudgment` only; `src/engine/resolution.ts` computes all numeric deltas. Never let the model invent body/resolve numbers.

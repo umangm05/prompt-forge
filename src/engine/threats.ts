@@ -1,28 +1,84 @@
-import type { ActiveThreat, ArbiterJudgment, GameState, TensionPhase } from '../types';
+import type {
+  ActiveThreat,
+  ArbiterJudgment,
+  GameState,
+  PlanRelation,
+  TacticalThread,
+  TensionPhase,
+  ThreadStatus,
+} from '../types';
 import { getBossPersonality } from './bossPersonalities';
 
-export function tensionPhase(round: number, threat?: ActiveThreat | null): TensionPhase {
-  if (threat && threat.timer <= 1) return 'crisis';
-  if (threat || round >= 3) return 'threat';
+export function tensionPhase(
+  round: number,
+  thread?: TacticalThread | null,
+): TensionPhase {
+  if (thread && thread.timer <= 1 && thread.status === 'armed') return 'crisis';
+  if (thread || round >= 3) return 'threat';
   return 'calm';
 }
 
-function pickTool(state: GameState): string {
-  const tools = getBossPersonality(state.bossAgenda.archetype).toolkit;
-  return tools[state.round % tools.length]!;
+export function threadToThreat(thread?: TacticalThread): ActiveThreat | undefined {
+  if (!thread) return undefined;
+  if (thread.status === 'spent' || thread.status === 'broken') return undefined;
+  return {
+    id: thread.id,
+    label: thread.label,
+    foreshadow: thread.foreshadow,
+    timer: thread.timer,
+    source:
+      thread.controller === 'player'
+        ? 'player'
+        : thread.controller === 'world'
+          ? 'world'
+          : 'boss',
+    tension: thread.tension,
+  };
 }
 
-/** Offline / fallback dilemmas — always include method flavor. */
-export function mockDilemmaIntent(state: GameState): string {
-  const arena = state.world.battlefield[0] ?? 'cover';
-  const weather = state.world.battlefield[1] ?? state.world.environmentalEvent ?? 'the weather';
-  const objects = state.world.battlefield[2] ?? 'debris';
-  const tool = pickTool(state);
-  const arch = state.bossAgenda.archetype;
-  const phase = tensionPhase(state.round, state.activeThreat);
+function foreshadowFor(label: string, timer: number): string {
+  const t = label.toLowerCase();
+  if (/rail|beam|support|pillar|platform|chain/.test(t)) {
+    return timer <= 1
+      ? 'Metal shrieks. The span sags under its own weight.'
+      : 'The railing groans. Rust flakes fall as the metal begins to bend.';
+  }
+  if (/climb|closing|approach/.test(t)) {
+    return timer <= 1
+      ? 'Hands at the rim. Dust rains down on your cover.'
+      : 'Boots scrape closer. Loose grit ticks onto the stone.';
+  }
+  if (/fire|heat|burn/.test(t)) return 'Heat shimmers off the metal. Paint bubbles.';
+  if (/flood|water|wet/.test(t)) return 'Water finds every crack. Footing darkens.';
+  if (/smoke|fog|ring|blind/.test(t))
+    return 'The air thickens. Edges of the field go soft.';
+  if (/mark|seal|bound|chalk/.test(t))
+    return 'The mark darkens. The line looks harder to cross.';
+  return timer <= 1
+    ? 'The field complains loudly — something is about to give.'
+    : 'Something on the field has started to fail.';
+}
 
-  if (state.activeThreat && state.activeThreat.timer <= 1) {
-    return `I finish with the ${tool} — I drive the ${state.activeThreat.label.toLowerCase()} to failure.`;
+export function mockDilemmaIntent(state: GameState): string {
+  const personality = getBossPersonality(state.bossAgenda.archetype);
+  const tool =
+    personality.toolkit.find(
+      (t) => !state.bossAgenda.unavailableResources.includes(t),
+    ) ?? personality.toolkit[0]!;
+  const objects =
+    state.world.fieldElements.find((e) =>
+      e.knownProperties.includes('objects'),
+    )?.name ??
+    state.world.battlefield[2] ??
+    'debris';
+  const arena =
+    state.world.fieldElements.find((e) => e.knownProperties.includes('arena'))
+      ?.name ??
+    state.world.battlefield[0] ??
+    'cover';
+
+  if (state.tacticalThread && state.tacticalThread.timer <= 1) {
+    return `I finish with the ${tool} — I drive the ${state.tacticalThread.label.toLowerCase()} to failure.`;
   }
 
   const byArch: Record<string, string[]> = {
@@ -36,7 +92,7 @@ export function mockDilemmaIntent(state: GameState): string {
       `I heat the joint with a glove until the ${objects.toLowerCase()} softens and sags.`,
     ],
     poet: [
-      `I fling ash into the ${weather.toLowerCase()} and pull it into a closing ring around your cover.`,
+      `I fling ash into the air and pull weather into a closing ring around your cover.`,
       `I plant a torn banner in the ${arena.toLowerCase()} so the place starts to feel like a grave.`,
     ],
     historian: [
@@ -57,160 +113,246 @@ export function mockDilemmaIntent(state: GameState): string {
     ],
   };
 
-  const pool = byArch[arch] ?? byArch.minimalist!;
-  if (phase === 'calm') return pool[0]!;
+  const pool = byArch[state.bossAgenda.archetype] ?? byArch.minimalist!;
   return pool[state.round % pool.length]!;
 }
 
-function foreshadowFor(label: string, timer: number): string {
-  const t = label.toLowerCase();
-  if (/rail|beam|support|pillar|platform/.test(t)) {
-    return timer <= 1
-      ? 'Metal shrieks. The span sags under its own weight.'
-      : 'The railing groans. Rust flakes fall as the metal begins to bend.';
-  }
-  if (/climb|closing|approach/.test(t)) {
-    return timer <= 1
-      ? 'Hands at the rim. Dust rains down on your cover.'
-      : 'Boots scrape closer. Loose grit ticks onto the stone.';
-  }
-  if (/fire|heat|burn/.test(t)) {
-    return 'Heat shimmers off the metal. Paint bubbles.';
-  }
-  if (/flood|water|wet/.test(t)) {
-    return 'Water finds every crack. Footing darkens.';
-  }
-  if (/smoke|fog|ring/.test(t)) {
-    return 'The air thickens. Edges of the field go soft.';
-  }
-  return timer <= 1
-    ? 'The field complains loudly — something is about to give.'
-    : 'Something on the field has started to fail.';
-}
-
-export function mockThreatForIntent(
+export function createThreadFromBossIntent(
   state: GameState,
   bossIntent: string,
   bossOutcome: string,
-): ActiveThreat | null {
+): TacticalThread | undefined {
   if (bossOutcome === 'failure' || bossOutcome === 'backfire') {
-    return state.activeThreat
-      ? { ...state.activeThreat, timer: Math.max(1, state.activeThreat.timer) }
-      : null;
+    return state.tacticalThread
+      ? { ...state.tacticalThread, status: 'developing' as ThreadStatus }
+      : undefined;
   }
 
-  const objects = state.world.battlefield[2] ?? 'Railing';
-  const arena = state.world.battlefield[0] ?? 'Platform';
+  const objects =
+    state.world.fieldElements.find((e) =>
+      e.knownProperties.includes('objects'),
+    )?.name ?? 'Railing';
+  const arena =
+    state.world.fieldElements.find((e) => e.knownProperties.includes('arena'))
+      ?.name ?? 'Platform';
   const lower = bossIntent.toLowerCase();
 
   let label = 'Shifting Ground';
-  if (/climb|grab the|sprint/.test(lower)) label = `Climbing ${arena}`;
-  else if (/cut|saw|slice|plasma|blade|heat|charge|wedge|rig/.test(lower))
+  let purpose = 'Deny safe footing';
+  let payoff = 'Ground fails under the player';
+  if (/climb|grab the|sprint/.test(lower)) {
+    label = `Climbing ${arena}`;
+    purpose = 'Close and tip';
+    payoff = 'Reach and shove from above';
+  } else if (/cut|saw|slice|plasma|blade|heat|charge|wedge|rig/.test(lower)) {
     label = `Damaged ${objects}`;
-  else if (/chalk|seal|rule|bound|spike|ledger/.test(lower))
-    label = `Marked Ground`;
-  else if (/ring|ash|storm|rain|banner/.test(lower)) label = `Closing Weather`;
-  else if (/smoke|flare|decoy|mirror/.test(lower)) label = `Blind Edge`;
+    purpose = 'Collapse a support';
+    payoff = 'Support fails into the player lane';
+  } else if (/chalk|seal|rule|bound|spike|ledger/.test(lower)) {
+    label = 'Marked Ground';
+    purpose = 'Bind exits with precedent';
+    payoff = 'Crossing the mark costs Resolve';
+  } else if (/ring|ash|storm|rain|banner/.test(lower)) {
+    label = 'Closing Weather';
+    purpose = 'Close a tragic ring';
+    payoff = 'Only path left runs into the boss';
+  } else if (/smoke|flare|decoy|mirror/.test(lower)) {
+    label = 'Blind Edge';
+    purpose = 'Steal attention while cutting elsewhere';
+    payoff = 'False lane collapses into a real bind';
+  }
 
-  if (state.activeThreat && state.activeThreat.label === label) {
-    const timer = Math.max(0, state.activeThreat.timer - 1);
+  const dep =
+    state.world.fieldElements.find((e) =>
+      label.toLowerCase().includes(e.name.toLowerCase().split(' ')[0]!),
+    )?.id ?? state.world.fieldElements[2]?.id;
+
+  if (state.tacticalThread && state.tacticalThread.label === label) {
+    const timer = Math.max(0, state.tacticalThread.timer - 1);
     return {
-      ...state.activeThreat,
+      ...state.tacticalThread,
       timer,
+      stage: state.tacticalThread.stage + 1,
       foreshadow: foreshadowFor(label, timer),
+      status: timer <= 1 ? 'armed' : 'developing',
       tension: timer <= 1 ? 'crisis' : 'threat',
+      dependencyIds: dep
+        ? Array.from(new Set([...state.tacticalThread.dependencyIds, dep]))
+        : state.tacticalThread.dependencyIds,
     };
   }
 
-  const timer = 3;
   return {
-    id: `threat-${state.round}`,
+    id: `thread-${state.round}`,
     label,
-    foreshadow: foreshadowFor(label, timer),
-    timer,
-    source: 'boss',
+    foreshadow: foreshadowFor(label, 3),
+    controller: 'boss',
+    purpose,
+    payoff,
+    stage: 1,
+    timer: 3,
+    dependencyIds: dep ? [dep] : [],
+    status: 'developing',
     tension: 'threat',
   };
 }
 
-export function threatFromJudgment(
+export function threadFromJudgment(
   state: GameState,
   judgment: ArbiterJudgment,
-): ActiveThreat | null {
-  if (judgment.clearThreat) return null;
+  bossRelation: PlanRelation,
+): TacticalThread | undefined {
+  if (
+    judgment.clearThreat &&
+    (bossRelation === 'break' ||
+      judgment.playerRelation === 'break' ||
+      judgment.playerRelation === 'reverse' ||
+      judgment.playerRelation === 'transfer')
+  ) {
+    if (!state.tacticalThread) return undefined;
+    return {
+      ...state.tacticalThread,
+      status:
+        judgment.playerRelation === 'reverse' ||
+        judgment.threadTransferTo === 'player'
+          ? 'reversed'
+          : 'broken',
+      foreshadow: 'The prepared line hangs unfinished.',
+    };
+  }
+
+  if (judgment.threadTransferTo && state.tacticalThread) {
+    return {
+      ...state.tacticalThread,
+      controller: judgment.threadTransferTo,
+      status: 'reversed',
+      foreshadow: `${state.tacticalThread.label} now answers to ${judgment.threadTransferTo}.`,
+    };
+  }
 
   const t = judgment.activeThreat;
   if (t && t.label.trim()) {
     const timer = Math.max(1, Math.min(4, Number(t.timer) || 3));
-    const foreshadow =
-      (t.foreshadow && t.foreshadow.trim()) ||
-      foreshadowFor(t.label, timer);
+    const dep = state.world.fieldElements[2]?.id;
+    if (state.tacticalThread && state.tacticalThread.label === t.label.trim()) {
+      return {
+        ...state.tacticalThread,
+        timer,
+        foreshadow: (t.foreshadow || foreshadowFor(t.label, timer)).slice(0, 160),
+        status: timer <= 1 ? 'armed' : 'developing',
+        tension: tensionPhase(state.round, {
+          ...state.tacticalThread,
+          timer,
+        }),
+        purpose: t.purpose ?? state.tacticalThread.purpose,
+        payoff: t.payoff ?? state.tacticalThread.payoff,
+      };
+    }
     return {
-      id: `threat-${state.round}`,
+      id: `thread-${state.round}`,
       label: t.label.trim().slice(0, 60),
-      foreshadow: foreshadow.slice(0, 160),
+      foreshadow: (t.foreshadow || foreshadowFor(t.label, timer)).slice(0, 160),
+      controller: 'boss',
+      purpose: t.purpose ?? 'Advance the boss plan',
+      payoff: t.payoff ?? 'Prepared chain pays off',
+      stage: 1,
       timer,
-      source: 'boss',
-      tension: tensionPhase(state.round, null),
+      dependencyIds: dep ? [dep] : [],
+      status: 'developing',
+      tension: 'threat',
     };
   }
 
   if (judgment.bossOutcome === 'failure' || judgment.bossOutcome === 'backfire') {
-    return state.activeThreat
-      ? { ...state.activeThreat, timer: Math.max(1, state.activeThreat.timer) }
-      : null;
+    return state.tacticalThread;
   }
 
-  if (state.activeThreat) {
-    const timer = Math.max(0, state.activeThreat.timer - 1);
+  if (state.tacticalThread && state.tacticalThread.status === 'developing') {
+    const timer = Math.max(0, state.tacticalThread.timer - 1);
     return {
-      ...state.activeThreat,
+      ...state.tacticalThread,
       timer,
-      foreshadow: foreshadowFor(state.activeThreat.label, timer),
+      stage: state.tacticalThread.stage + 1,
+      foreshadow: foreshadowFor(state.tacticalThread.label, timer),
+      status: timer <= 1 ? 'armed' : 'developing',
       tension: timer <= 1 ? 'crisis' : 'threat',
     };
   }
 
-  return mockThreatForIntent(state, judgment.bossIntent, judgment.bossOutcome);
+  return (
+    createThreadFromBossIntent(
+      state,
+      judgment.bossIntent || state.bossAgenda.commitment?.raw || '',
+      judgment.bossOutcome,
+    ) ?? state.tacticalThread
+  );
 }
 
-export function crisisPayoff(threat: ActiveThreat | null): {
+/** Payoff only from the prepared causal chain — not generic timer damage. */
+export function crisisPayoff(thread: TacticalThread | null): {
   playerBody: number;
   playerResolve: number;
   note: string;
+  consumeDependencies: boolean;
 } | null {
-  if (!threat || threat.timer > 0) return null;
+  if (!thread || thread.timer > 0) return null;
+  if (thread.status === 'broken' || thread.status === 'reversed') return null;
   return {
     playerBody: -6,
     playerResolve: -12,
-    note: `${threat.label} gives way — debris clips you.`,
+    note: `${thread.label} pays off — ${thread.payoff}`,
+    consumeDependencies: true,
   };
 }
 
-export function playerAddressesThreat(
+/**
+ * Keyword mention is NOT enough. Causal success is required to clear a thread.
+ * This helper only hints that the player *aimed* at the problem.
+ */
+export function playerAimsAtThread(
   playerRaw: string,
-  threat: ActiveThreat | null,
+  thread: TacticalThread | null,
 ): boolean {
-  if (!threat) return false;
-  const t = `${threat.label} ${threat.foreshadow}`.toLowerCase();
+  if (!thread) return false;
+  const t = `${thread.label} ${thread.foreshadow}`.toLowerCase();
   const words = t
     .replace(/[^a-z0-9\s]/g, ' ')
     .split(/\s+/)
     .filter((w) => w.length > 4);
   const raw = playerRaw.toLowerCase();
   const hits = words.filter((w) => raw.includes(w)).length;
-  return (
-    hits >= 2 ||
-    /\b(stop|break|save|defend|cover|pillar|rail|beam|flee|run|counter|interrupt|disarm|cutter|charge)\b/.test(
-      raw,
-    )
-  );
+  return hits >= 2;
 }
 
-/** UI / dossier lines — facts only, no advice. */
+/** @deprecated Use playerAimsAtThread — mention alone must not clear. */
+export function playerAddressesThreat(
+  playerRaw: string,
+  threat: ActiveThreat | null,
+): boolean {
+  if (!threat) return false;
+  return playerAimsAtThread(playerRaw, {
+    id: threat.id,
+    label: threat.label,
+    foreshadow: threat.foreshadow,
+    controller: threat.source === 'player' ? 'player' : 'boss',
+    purpose: '',
+    payoff: '',
+    stage: 1,
+    timer: threat.timer,
+    dependencyIds: [],
+    status: 'developing',
+    tension: threat.tension,
+  });
+}
+
 export function formatThreatSigns(threat: ActiveThreat): string[] {
+  return [`⚠ ${threat.label} (${threat.timer})`, threat.foreshadow];
+}
+
+export function formatThreadSigns(thread: TacticalThread): string[] {
   return [
-    `⚠ ${threat.label} (${threat.timer})`,
-    threat.foreshadow,
+    `⚠ ${thread.label} (${thread.timer})`,
+    thread.foreshadow,
+    `Purpose: ${thread.purpose}`,
   ];
 }

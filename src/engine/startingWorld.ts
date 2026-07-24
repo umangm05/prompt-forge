@@ -4,6 +4,8 @@ import {
   WEATHER_POOL,
 } from '../config/gameConfig';
 import type { InitiativeHolder, Position, WorldState } from '../types';
+import { elementsFromStartingTags, syncBattlefieldLabels } from './fieldElements';
+import { seedThresholdsForArena } from './worldThresholds';
 
 export interface StartingLayout {
   world: WorldState;
@@ -18,6 +20,7 @@ function pickOne<T>(items: readonly T[], rng: () => number): T {
 /**
  * Fresh arena each duel — exactly 3 starting conditions:
  * arena geometry, weather, surrounding objects.
+ * Also seeds latent world thresholds from those tags.
  */
 export function rollStartingLayout(rng: () => number = Math.random): StartingLayout {
   const arena = pickOne(ARENA_POOL, rng);
@@ -31,14 +34,20 @@ export function rollStartingLayout(rng: () => number = Math.random): StartingLay
     rng() < 0.7 ? pickOne(other.length ? other : positions, rng) : playerPosition;
 
   const initiative: InitiativeHolder = rng() < 0.5 ? 'player' : 'boss';
+  const fieldElements = elementsFromStartingTags([arena, weather, objects]);
+  const thresholds = seedThresholdsForArena(fieldElements);
+
+  const world = syncBattlefieldLabels({
+    battlefield: [arena, weather, objects],
+    fieldElements,
+    thresholds,
+    environmentalEvent: weather,
+    realityPressure: 0.18 + rng() * 0.2,
+    initiative,
+  });
 
   return {
-    world: {
-      battlefield: [arena, weather, objects],
-      environmentalEvent: weather,
-      realityPressure: 0.18 + rng() * 0.2,
-      initiative,
-    },
+    world,
     playerPosition,
     bossPosition,
   };

@@ -183,18 +183,18 @@ function renderSetup(opts: {
         <section class="md:col-span-2 border border-amber/40 bg-terminal-bg p-4 space-y-3">
           <h2 class="text-amber text-xs tracking-widest">> HOW_TO_PLAY</h2>
           <p class="text-[12px] text-terminal-text leading-relaxed">
-            PromptForge is a <span class="text-neon">courtroom for reality</span> — but the real game is
-            <span class="text-crimson">creating dilemmas</span>. You declare Arguments (attempts).
-            The boss commits at the same time to a problem you must answer. The Arbiter judges the clash.
+            PromptForge is a <span class="text-neon">tactical conversation</span> — reshape the field
+            <span class="text-crimson">and</span> the boss’s beliefs. The boss commits first. You answer.
+            The Arbiter judges the clash. Causality permits; drama chooses.
           </p>
           <div class="grid md:grid-cols-2 gap-3 text-[11px] text-terminal-dim font-mono leading-relaxed">
             <div>
               <div class="text-neon tracking-widest mb-1">THE LOOP</div>
               <ol class="list-decimal pl-4 space-y-1">
-                <li>Read 3 cards + <span class="text-crimson">Battlefield signs</span> (⚠ Damaged Railing (3)…).</li>
-                <li>Discover implications yourself — the game will not say “choose between…”.</li>
-                <li>Commit an intent. Never guaranteed results (<span class="text-crimson">“I deal 20 damage”</span>).</li>
-                <li>Bosses use tools (blade, cutter, chalk…) and advance a plan you can sense.</li>
+                <li>Read <span class="text-crimson">BOSS_COMMITS</span> before you type.</li>
+                <li>Watch signs, omens, tempo, named field scars — never “choose between…”.</li>
+                <li>Commit an intent. Feints and probes are legal; probes always teach.</li>
+                <li>Bosses have flaws and signature moments — pride can override optimal play.</li>
                 <li>Read <span class="text-amber">Why it hurt</span> — numbers always have a cause.</li>
               </ol>
             </div>
@@ -203,8 +203,9 @@ function renderSetup(opts: {
               <ul class="list-disc pl-4 space-y-1">
                 <li><span class="text-terminal-text">Body</span> — physical integrity.</li>
                 <li><span class="text-terminal-text">Resolve</span> — belief. Hit 0 = duel loss.</li>
-                <li>Ignore a threat timer and it <span class="text-crimson">pays off</span>.</li>
-                <li><span class="text-amber">2 HELPs</span> / duel · <span class="text-amber">?</span> for tips + sample intents.</li>
+                <li>Ignore a prepared thread and its <span class="text-crimson">payoff</span> lands.</li>
+                <li>Plant false signals; punish the boss’s wrong read.</li>
+                <li><span class="text-amber">2 HELPs</span> / duel · <span class="text-amber">?</span> for tips.</li>
               </ul>
             </div>
           </div>
@@ -358,7 +359,7 @@ function renderArena(
           </button>
           <div class="min-w-0 flex-1">
             <div class="text-crimson text-xs tracking-widest">${showBoss ? esc(bossMeta.name) : 'UNKNOWN_ENTITY'}</div>
-            <div class="text-[10px] text-terminal-dim mb-2">${showBoss ? esc(bossMeta.trait) : 'TRAIT: ???'} · AGENDA ${state.bossAgenda.progress}</div>
+            <div class="text-[10px] text-terminal-dim mb-2">${showBoss ? esc(bossMeta.trait) : 'TRAIT: ???'} · ${esc(state.bossAgenda.posture.toUpperCase())} · AGENDA ${state.bossAgenda.progress}</div>
             <div class="text-[10px] text-terminal-dim flex justify-between"><span>BODY</span><span>${state.boss.body.toFixed(0)}</span></div>
             ${miniBar(state.boss.body, 'crimson')}
             <div class="text-[10px] text-terminal-dim flex justify-between mt-1"><span>RESOLVE</span><span>${state.boss.resolve.toFixed(0)}</span></div>
@@ -376,6 +377,7 @@ function renderArena(
     <div class="absolute top-3 right-3 z-20 text-right text-[10px] font-mono text-terminal-dim">
       <div>ROUND <span class="text-neon">${state.round}</span></div>
       <div>INIT <span class="text-amber">${state.world.initiative.toUpperCase()}</span></div>
+      <div>TEMPO <span class="text-amber">${esc(state.tempo.beat.toUpperCase())}</span></div>
       <div>P_r ${(state.world.realityPressure * 100).toFixed(0)}%</div>
       ${
         opts.lastJudgmentMs != null
@@ -401,19 +403,53 @@ function renderArena(
     <!-- MIDDLE RIGHT: Threat / Environment / facts -->
     <aside class="absolute top-24 right-3 bottom-36 z-20 w-[min(100%,260px)] overflow-y-auto log-scroll">
       <div class="border border-terminal-border bg-terminal-panel/95 p-3 space-y-3">
-        <div class="border ${state.activeThreat ? 'border-crimson/60 bg-crimson/10' : 'border-terminal-border'} p-2">
+        <div class="border border-crimson/50 bg-crimson/10 p-2">
+          <div class="text-crimson text-[10px] tracking-widest mb-1">BOSS_COMMITS</div>
+          ${
+            state.bossAgenda.commitment
+              ? `<p class="text-[11px] text-terminal-text font-mono leading-snug">${esc(state.bossAgenda.commitment.raw)}</p>
+                 ${
+                   state.bossAgenda.commitment.tell
+                     ? `<p class="text-[10px] text-amber mt-1.5 leading-relaxed">Tell: ${esc(state.bossAgenda.commitment.tell)}</p>`
+                     : ''
+                 }`
+              : `<p class="text-[10px] text-terminal-dim font-mono">No visible commitment yet.</p>`
+          }
+        </div>
+        <div class="border ${state.activeThreat || state.tacticalThread ? 'border-crimson/60 bg-crimson/10' : 'border-terminal-border'} p-2">
           <div class="text-crimson text-[10px] tracking-widest mb-1">BATTLEFIELD_SIGNS</div>
           ${
-            state.activeThreat
-              ? `<p class="text-[12px] text-terminal-text font-mono leading-snug">⚠ ${esc(state.activeThreat.label)} (${state.activeThreat.timer})</p>
-                 <p class="text-[10px] text-terminal-dim mt-1.5 leading-relaxed">${esc(state.activeThreat.foreshadow)}</p>`
+            state.tacticalThread || state.activeThreat
+              ? `<p class="text-[12px] text-terminal-text font-mono leading-snug">⚠ ${esc((state.tacticalThread ?? state.activeThreat)!.label)} (${(state.tacticalThread ?? state.activeThreat)!.timer})</p>
+                 <p class="text-[10px] text-terminal-dim mt-1.5 leading-relaxed">${esc((state.tacticalThread ?? state.activeThreat)!.foreshadow)}</p>
+                 ${
+                   state.tacticalThread
+                     ? `<p class="text-[10px] text-terminal-dim mt-1">${esc(state.tacticalThread.purpose)}</p>`
+                     : ''
+                 }`
               : `<p class="text-[10px] text-terminal-dim font-mono">Quiet for now. Watch for new marks on the field.</p>`
           }
         </div>
+        ${
+          state.temptation
+            ? `<div class="border border-amber/50 bg-amber/10 p-2">
+                <div class="text-amber text-[10px] tracking-widest mb-1">FIELD_PRESSURE</div>
+                <p class="text-[10px] text-terminal-text leading-relaxed">${esc(state.temptation.foreshadow)}</p>
+              </div>`
+            : ''
+        }
         <div>
           <div class="text-amber text-[10px] tracking-widest mb-1">ENVIRONMENT</div>
           <p class="text-[11px] text-terminal-text font-mono">${esc(state.world.environmentalEvent ?? 'STABLE')}</p>
-          <p class="text-[10px] text-terminal-dim mt-1">RANGE ${state.player.position}</p>
+          <p class="text-[10px] text-terminal-dim mt-1">YOU ${state.player.position} · BOSS ${state.boss.position}</p>
+          ${
+            (() => {
+              const omen = state.world.thresholds.find((t) => !t.triggered && t.progress > 0);
+              return omen
+                ? `<p class="text-[10px] text-amber mt-1.5 leading-relaxed">Omen (${esc(omen.label)}): ${esc(omen.omen)}</p>`
+                : '';
+            })()
+          }
         </div>
         <div>
           <div class="text-neon text-[10px] tracking-widest mb-1">GREEN_FACTS</div>
@@ -436,9 +472,34 @@ function renderArena(
           </ul>
         </div>
         <div>
-          <div class="text-terminal-dim text-[10px] tracking-widest mb-1">BATTLEFIELD_RAW</div>
-          <p class="text-[11px] font-mono text-terminal-text">${esc(state.world.battlefield.join(' · ') || '—')}</p>
+          <div class="text-terminal-dim text-[10px] tracking-widest mb-1">NAMED_FIELD</div>
+          <ul class="text-[10px] font-mono text-terminal-text space-y-1">
+            ${
+              state.world.fieldElements.length
+                ? state.world.fieldElements
+                    .slice(0, 6)
+                    .map((e) => {
+                      const scar = e.scars[0] ? ` — ${e.scars[0]}` : '';
+                      return `<li>${esc(e.name)} <span class="text-terminal-dim">[${esc(e.condition)}]${esc(scar)}</span></li>`;
+                    })
+                    .join('')
+                : `<li>${esc(state.world.battlefield.join(' · ') || '—')}</li>`
+            }
+          </ul>
         </div>
+        ${
+          state.discoveries.length
+            ? `<div>
+                <div class="text-neon text-[10px] tracking-widest mb-1">LEARNED</div>
+                <ul class="text-[10px] text-neon/80 space-y-1 font-mono">
+                  ${state.discoveries
+                    .slice(-3)
+                    .map((d) => `<li>${esc(d.finding)}</li>`)
+                    .join('')}
+                </ul>
+              </div>`
+            : ''
+        }
       </div>
     </aside>
 

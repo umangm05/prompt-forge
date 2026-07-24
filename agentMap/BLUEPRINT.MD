@@ -169,17 +169,17 @@ Environmental events interact with the persistent battlefield state and hidden t
 
 ---
 
-## 11. THE INTERLOCKING SIMULTANEOUS COMBAT LOOP
+## 11. THE COMMITMENT-FIRST TACTICAL CONVERSATION LOOP
 
-The turn structure operates on a simultaneous resolution model, eliminating artificial defender bias and turning the duel into an active battle of wits.
+The turn structure is simultaneous in resolution but **commitment-first** for agency: the boss's Argument is visible before the player types. The Arbiter judges that committed clash — it must not invent a new boss plan after reading the player. Combat is tactical information warfare (field + beliefs) optimized for memorable moments, not perfect boss play.
 
 ### 11.1 The Step-by-Step Loop Flow
-1.  **Round Start:** The engine evaluates the current state and determines which entity holds the **Initiative Token**. It may inject an Environmental Event.
-2.  **Player Phase:** The player inputs a single tactical intent (an Argument), classified by category and target.
-3.  **Boss Phase:** The local engine generates a single tactical intent based on the Boss's active Archetype and ongoing long-term plan.
-4.  **Arbiter Processing:** Both intents, along with the Environment Ledgers, persistent battlefield state, positioning, awareness, hidden-trait context, word-fatigue state, and Initiative state, are passed to the API Arbiter in a single execution payload.
-5.  **Simultaneous Resolution:** The Arbiter interlocks both intents, simulates the physical collision, and outputs a unified narrative sequence plus a structured verdict.
-6.  **State Mutation:** The interface updates the Green/Yellow Ledgers, applies Body/Resolve changes, adjusts Awareness and Positioning, updates battlefield substances, records word-fatigue usage, reveals any deduced hidden trait, and recalculates Reality Pressure.
+1.  **Round Start / Commit:** Engine holds Initiative, surfaces omens from seeded world thresholds (no random event injection), and ensures a visible **Boss Commitment** exists (method, target, purpose, optional signature tell).
+2.  **Player Phase:** The player inputs a single tactical intent against that commitment (may feint, probe, interrupt, or exploit).
+3.  **Arbiter Processing:** Snapshot includes `committedBossIntent` (not invent). Arbiter copies it, judges the collision, emits causalEvents / discoveries / observableSignals / fieldSigns.
+4.  **Causal Reduction:** Engine applies numeric deltas only when justified by causal events; updates named field elements, tactical threads, ledgers.
+5.  **Beliefs & World:** Extract observables → update fallible boss beliefs → evaluate expectation breaks → advance latent world thresholds → shape tempo → detect temptations.
+6.  **Adapt & Recommit:** Boss selects next commitment from beliefs, emotion/flaw, greed, and available means — never from the player's uncommitted next text. UI updates without enumerating choices.
 
 ### 11.2 The Momentum Swing (Initiative)
 Initiative is a binary token held by either the Player or the Boss representing tactical dominance.

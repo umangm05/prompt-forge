@@ -401,23 +401,53 @@ export function buildArenaCards(state: GameState): ArenaCard[] {
   const weatherSet = new Set<string>(WEATHER_POOL);
   const objectSet = new Set<string>(OBJECTS_POOL);
 
-  for (const t of state.world.battlefield) {
-    let kind: CardKind = 'terrain';
-    let detail = 'Active battlefield state';
-    if (
-      weatherSet.has(t) ||
-      /rain|fog|vacuum|gravity|eclipse|heat|wind/i.test(t)
-    ) {
-      kind = 'weather';
-      detail = 'Weather';
-    } else if (arenaSet.has(t)) {
-      kind = 'terrain';
-      detail = 'Arena geometry';
-    } else if (objectSet.has(t)) {
-      kind = 'terrain';
-      detail = 'Surrounding objects';
+  // Prefer structured named elements (with scars / identity) when present.
+  if (state.world.fieldElements?.length) {
+    for (const el of state.world.fieldElements) {
+      if (!el.usable && !el.scars.length) continue;
+      let kind: CardKind = 'terrain';
+      let detail = el.condition;
+      if (el.knownProperties.includes('weather') || /rain|fog|vacuum|gravity|eclipse|heat|wind/i.test(el.name)) {
+        kind = 'weather';
+        detail = el.scars[0] ?? 'Weather';
+      } else if (el.knownProperties.includes('arena') || arenaSet.has(el.name)) {
+        kind = 'terrain';
+        detail = el.scars[0] ?? 'Arena geometry';
+      } else if (el.knownProperties.includes('objects') || objectSet.has(el.name)) {
+        kind = 'terrain';
+        detail = el.scars[0] ?? 'Surrounding objects';
+      } else if (el.scars.length || el.condition === 'transformed') {
+        kind = 'event';
+        detail = el.history[el.history.length - 1] ?? el.condition;
+      }
+      const card = enrich(kind, el.name, detail);
+      if (el.scars[0]) {
+        card.cons = [`Scar: ${el.scars[0]}`, ...card.cons].slice(0, 3);
+      }
+      if (el.knownProperties[0]) {
+        card.pros = [`Known: ${el.knownProperties[0]}`, ...card.pros].slice(0, 3);
+      }
+      push(card);
     }
-    push(enrich(kind, t, detail));
+  } else {
+    for (const t of state.world.battlefield) {
+      let kind: CardKind = 'terrain';
+      let detail = 'Active battlefield state';
+      if (
+        weatherSet.has(t) ||
+        /rain|fog|vacuum|gravity|eclipse|heat|wind/i.test(t)
+      ) {
+        kind = 'weather';
+        detail = 'Weather';
+      } else if (arenaSet.has(t)) {
+        kind = 'terrain';
+        detail = 'Arena geometry';
+      } else if (objectSet.has(t)) {
+        kind = 'terrain';
+        detail = 'Surrounding objects';
+      }
+      push(enrich(kind, t, detail));
+    }
   }
 
   // Weather is already on the battlefield at duel start — do not add a 4th duplicate event card.

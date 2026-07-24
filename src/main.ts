@@ -15,7 +15,6 @@ import {
 import {
   appendMatchLog,
   beginRound,
-  buildBossParsed,
   buildSnapshot,
   composeJudgmentDocument,
   createInitialState,
@@ -241,7 +240,13 @@ async function requestHelp(): Promise<void> {
       const snapshot = buildSnapshot(
         state,
         parsePlayerIntent(state, 'I look for an opening.'),
-        { generateBossIntent: true },
+        {
+          bossParsed: resolveBossParsed(
+            state,
+            state.bossAgenda.commitment?.raw,
+          ),
+          generateBossIntent: false,
+        },
       );
       suggestion = await withTimeout(
         arbiter.suggestIntent(snapshot),
@@ -308,12 +313,17 @@ function startGame(): void {
   statusLine = useMock
     ? 'mock arbiter online'
     : `api arbiter · ${apiConfig.model} · target <${JUDGMENT_LATENCY_TARGET_MS}ms`;
+  const opening =
+    state.bossAgenda.commitment?.tell ||
+    state.bossAgenda.commitment?.raw ||
+    'They arrive.';
   setSpeech({
-    arbiter: 'Ready.',
-    boss: bossRevealed ? 'They arrive.' : '?',
+    arbiter: 'Ready. Read their commitment.',
+    boss: bossRevealed ? opening : '?',
     player: '',
     phase: 'verdict',
   });
+  speechOpen = { boss: bossRevealed, player: false };
   paint({ runTyping: false });
 
   if (!bossRevealed) {
@@ -321,10 +331,11 @@ function startGame(): void {
       bossRevealed = true;
       setSpeech({
         player: '',
-        boss: 'They arrive.',
+        boss: state.bossAgenda.commitment?.raw || 'They arrive.',
         arbiter: 'Begin.',
         phase: 'verdict',
       });
+      speechOpen = { boss: true, player: false };
       paint({ runTyping: false });
     }, 900);
   }
@@ -429,9 +440,10 @@ async function runTurn(raw: string): Promise<void> {
     let bossParsed: ParsedIntent;
     const t0 = performance.now();
 
+    // Boss Argument is precommitted before player input — never invented after reading it.
+    bossParsed = resolveBossParsed(state, state.bossAgenda.commitment?.raw);
+
     if (useMock || !arbiter.isReady()) {
-      // Offline: personality-flavored scripted intent + mock judgment
-      bossParsed = buildBossParsed(state);
       await new Promise((r) => setTimeout(r, 350));
       const result = resolveWithMock(state, playerParsed, bossParsed);
       judgment = result.judgment;
@@ -439,11 +451,11 @@ async function runTurn(raw: string): Promise<void> {
       next = result.next;
       lastJudgmentMs = Math.round(performance.now() - t0);
     } else {
-      // API: send personality + player intent; boss Argument comes back in same JSON
       statusLine = `calling ${apiConfig.model}…`;
       paint({ runTyping: false });
       const snapshot = buildSnapshot(state, playerParsed, {
-        generateBossIntent: true,
+        bossParsed,
+        generateBossIntent: false,
       });
       judgment = await withTimeout(
         arbiter.judge(snapshot),
@@ -451,7 +463,9 @@ async function runTurn(raw: string): Promise<void> {
         'Arbiter judgment',
       );
       lastJudgmentMs = Math.round(performance.now() - t0);
+      // Keep the precommitted Argument even if the model rewrites bossIntent.
       bossParsed = resolveBossParsed(state, judgment.bossIntent);
+      judgment.bossIntent = bossParsed.intent.raw;
       const resolved = resolveWithJudgment(
         state,
         judgment,

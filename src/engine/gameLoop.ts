@@ -2,30 +2,47 @@ import type {
   ArbiterJudgment,
   BossArchetype,
   CompactGameSnapshot,
+  EmotionalTrigger,
   GameState,
   MatchLogEntry,
   ParsedIntent,
   ResolvedVerdict,
 } from '../types';
 import { applyAwarenessShift } from './awareness';
-import { createBossAgenda, generateBossIntent, updateBossAgenda } from './bossArchetypes';
+import {
+  buildBossObservation,
+  reviseBeliefsOnContradiction,
+  updateBeliefsFromSignals,
+} from './beliefs';
+import {
+  commitBossForRound,
+  createBossAgenda,
+  generateBossIntent,
+  updateBossAgenda,
+  buildCommitmentFromObservation,
+} from './bossArchetypes';
 import { getBossPersonality } from './bossPersonalities';
+import { resolveExperiment } from './discoveries';
 import {
   clearStaleEvent,
+  evaluateWorldThresholds,
   maybeInjectEnvironmentalEvent,
+  currentOmen,
 } from './environmentalEvents';
+import { applyFieldMutations, syncBattlefieldLabels } from './fieldElements';
 import { pickHiddenTrait, revealTrait } from './hiddenTraits';
 import { parseIntent } from './inputParser';
 import { applyLedgerMutations, createEmptyLedgers } from './ledgers';
-import { isNearDuplicateLabel } from './labelDedupe';
 import { applyPositionShift } from './positioning';
 import { mockJudgment, resolveJudgment } from './resolution';
 import { rollStartingLayout } from './startingWorld';
+import { createTempoState, shapeTempo } from './tempo';
+import { detectTemptation, tickTemptation } from './temptations';
 import {
   crisisPayoff,
-  playerAddressesThreat,
   tensionPhase,
-  threatFromJudgment,
+  threadFromJudgment,
+  threadToThreat,
 } from './threats';
 import {
   applyDeltas,
@@ -38,7 +55,8 @@ export function createInitialState(
   bossArchetype: BossArchetype = 'lawyer',
 ): GameState {
   const start = rollStartingLayout();
-  return {
+  const personality = getBossPersonality(bossArchetype);
+  let state: GameState = {
     round: 1,
     player: {
       id: 'player',
@@ -65,16 +83,34 @@ export function createInitialState(
     ledgers: createEmptyLedgers(),
     world: start.world,
     bossAgenda: createBossAgenda(bossArchetype),
+    tacticalThread: undefined,
     activeThreat: undefined,
+    tempo: createTempoState(),
+    temptation: undefined,
+    discoveries: [],
+    lastCausalEvents: [],
     log: [],
     matchLog: [],
   };
+
+  // Pre-commit the opening boss Argument before any player input.
+  const { state: committed } = commitBossForRound(state);
+  state = committed;
+  state.boss.name = personality.name;
+  return state;
 }
 
 export function beginRound(state: GameState): GameState {
   let world = clearStaleEvent(state.world, state.round);
   world = maybeInjectEnvironmentalEvent(world);
-  return { ...state, world };
+
+  // Ensure a visible commitment exists before the player types.
+  let next = { ...state, world };
+  if (!next.bossAgenda.commitment) {
+    const { state: committed } = commitBossForRound(next);
+    next = committed;
+  }
+  return next;
 }
 
 export function parsePlayerIntent(
@@ -89,11 +125,16 @@ export function buildBossParsed(state: GameState): ParsedIntent {
   return parseIntent(intent.raw, state.boss);
 }
 
-/** Parse boss Argument returned by the Arbiter; fall back to offline generator. */
+/** Prefer the precommitted Argument; never invent from current player text. */
 export function resolveBossParsed(
   state: GameState,
   bossIntentRaw: string | undefined,
 ): ParsedIntent {
+  const committed = state.bossAgenda.commitment?.raw?.trim();
+  if (committed) {
+    const parsed = parseIntent(committed, state.boss);
+    if (!parsed.rejected) return parsed;
+  }
   const raw = bossIntentRaw?.trim();
   if (raw) {
     const parsed = parseIntent(raw, state.boss);
@@ -108,8 +149,7 @@ export function buildSnapshot(
   opts?: { bossParsed?: ParsedIntent; generateBossIntent?: boolean },
 ): CompactGameSnapshot {
   const personality = getBossPersonality(state.bossAgenda.archetype);
-  const generate = opts?.generateBossIntent ?? !opts?.bossParsed;
-  const bossParsed = opts?.bossParsed;
+  const bossParsed = opts?.bossParsed ?? buildBossParsed(state);
   const recentBossIntents = state.matchLog
     .slice(-4)
     .map((m) => m.bossPrompt)
@@ -121,6 +161,12 @@ export function buildSnapshot(
     realityPressure: state.world.realityPressure,
     environmentalEvent: state.world.environmentalEvent,
     battlefield: state.world.battlefield,
+    fieldElements: state.world.fieldElements.map((e) => ({
+      name: e.name,
+      condition: e.condition,
+      knownProperties: e.knownProperties,
+      scars: e.scars,
+    })),
     facts: state.ledgers.facts,
     assumptions: state.ledgers.assumptions,
     player: {
@@ -140,6 +186,8 @@ export function buildSnapshot(
       position: state.boss.position,
       archetype: state.bossAgenda.archetype,
       agendaProgress: state.bossAgenda.progress,
+      posture: state.bossAgenda.posture,
+      definingFlaw: state.bossAgenda.definingFlaw,
       personality: {
         name: personality.name,
         trait: personality.trait,
@@ -150,17 +198,81 @@ export function buildSnapshot(
         tactics: personality.tactics,
         taboos: personality.taboos,
         sampleMoves: personality.sampleMoves,
+        biases: personality.biases,
+        obsessions: personality.obsessions,
+        prideRule: personality.prideRule,
+        fear: personality.fear,
+        habit: personality.habit,
+        blindSpots: personality.blindSpots,
+        breakingPoint: personality.breakingPoint,
+        signatureMoments: personality.signatureMoments,
       },
     },
+    committedBossIntent: bossParsed.intent,
     playerIntent: playerParsed.intent,
-    bossIntent: generate ? undefined : bossParsed?.intent,
+    bossIntent: bossParsed.intent,
     playerFatiguePenalty: playerParsed.fatiguePenalty,
-    bossFatiguePenalty: bossParsed?.fatiguePenalty ?? 0,
-    generateBossIntent: generate,
+    bossFatiguePenalty: bossParsed.fatiguePenalty,
+    // Commitment loop: Arbiter must NOT invent a new boss Argument after reading the player.
+    generateBossIntent: false,
     activeThreat: state.activeThreat,
-    tension: tensionPhase(state.round, state.activeThreat),
+    tacticalThread: state.tacticalThread,
+    tempo: state.tempo,
+    temptationForeshadow: state.temptation?.foreshadow,
+    tension: tensionPhase(state.round, state.tacticalThread),
     recentBossIntents,
+    discoveries: state.discoveries.slice(-4),
+    omen: currentOmen(state.world),
+    lastTransformation: state.world.lastTransformation,
   };
+}
+
+function collectEmotionalTriggers(
+  state: GameState,
+  verdict: ResolvedVerdict,
+  judgment: ArbiterJudgment | undefined,
+): EmotionalTrigger[] {
+  const triggers = [...state.bossAgenda.emotionalTriggers];
+  const p = getBossPersonality(state.bossAgenda.archetype);
+  const removed = verdict.battlefieldMutations.remove.join(' ').toLowerCase();
+  const added = verdict.battlefieldMutations.add.join(' ').toLowerCase();
+  const blob = `${removed} ${added} ${judgment?.judgmentNarrative ?? ''}`.toLowerCase();
+
+  if (
+    /mirror|shard|banner|seal|ledger|tablet/.test(blob) &&
+    (verdict.playerRelation === 'break' ||
+      verdict.battlefieldMutations.remove.length > 0)
+  ) {
+    triggers.push({
+      id: `emo-${state.round}-cherish`,
+      kind: 'cherished_destroyed',
+      description: `A cherished prop was damaged: ${blob.slice(0, 60)}`,
+      round: state.round,
+      spent: false,
+    });
+  }
+  if (verdict.bossOutcome === 'backfire' || verdict.bossOutcome === 'failure') {
+    triggers.push({
+      id: `emo-${state.round}-fail`,
+      kind: 'failed_method',
+      description: `Method failed: ${state.bossAgenda.commitment?.method ?? 'tool'}`,
+      round: state.round,
+      spent: false,
+    });
+  }
+  if (
+    verdict.playerOutcome === 'success' &&
+    /humiliat|laugh|ignore|break|shatter/i.test(judgment?.bossReaction ?? '')
+  ) {
+    triggers.push({
+      id: `emo-${state.round}-pride`,
+      kind: 'pride_challenged',
+      description: p.breakingPoint,
+      round: state.round,
+      spent: false,
+    });
+  }
+  return triggers.slice(-6);
 }
 
 export function applyResolvedVerdict(
@@ -173,27 +285,47 @@ export function applyResolvedVerdict(
   let playerBodyDelta = verdict.playerBodyDelta;
   let playerResolveDelta = verdict.playerResolveDelta;
 
-  // Pay off expired threats that were never answered
-  let workingThreat = state.activeThreat;
+  // Thread lifecycle — causal clear only.
+  let workingThread = state.tacticalThread;
   if (judgment) {
-    const addressed = playerAddressesThreat(
-      playerParsed.intent.raw,
-      state.activeThreat ?? null,
+    workingThread = threadFromJudgment(
+      { ...state, tacticalThread: workingThread },
+      {
+        ...judgment,
+        clearThreat: verdict.threadCleared,
+        threadTransferTo: verdict.threadTransferredTo,
+        playerRelation: verdict.playerRelation,
+      },
+      verdict.bossRelation,
     );
-    if (judgment.clearThreat || addressed) {
-      workingThreat = undefined;
-    } else {
-      workingThreat = threatFromJudgment(state, judgment) ?? undefined;
-    }
   }
+
   const payoff = crisisPayoff(
-    workingThreat && workingThreat.timer <= 0 ? workingThreat : null,
+    workingThread && workingThread.timer <= 0 ? workingThread : null,
   );
   if (payoff) {
     playerBodyDelta += payoff.playerBody;
     playerResolveDelta += payoff.playerResolve;
-    workingThreat = undefined;
+    workingThread = workingThread
+      ? { ...workingThread, status: 'spent', foreshadow: payoff.note }
+      : undefined;
   }
+
+  // Experiments always teach — apply discovery mutations.
+  const experiment = resolveExperiment(state, playerParsed, verdict.playerOutcome);
+  let world = {
+    ...state.world,
+    fieldElements: experiment.elements,
+  };
+  world = syncBattlefieldLabels(world);
+  world = applyFieldMutations(
+    world,
+    verdict.battlefieldMutations.add,
+    verdict.battlefieldMutations.remove,
+    verdict.playerRelation === 'break' || verdict.playerRelation === 'transfer'
+      ? 'player'
+      : 'boss',
+  );
 
   let player = applyDeltas(state.player, playerBodyDelta, playerResolveDelta);
   let boss = applyDeltas(
@@ -202,10 +334,20 @@ export function applyResolvedVerdict(
     verdict.bossResolveDelta,
   );
 
-  boss = applyAwarenessShift(boss, verdict.targetAwarenessShift);
-  const pos = applyPositionShift(player.position, verdict.positionShift);
-  player = { ...player, position: pos };
-  boss = { ...boss, position: pos };
+  // Independent awareness + position tracks.
+  if (verdict.awarenessTarget === 'player') {
+    player = applyAwarenessShift(player, verdict.targetAwarenessShift);
+  } else {
+    boss = applyAwarenessShift(boss, verdict.targetAwarenessShift);
+  }
+  player = {
+    ...player,
+    position: applyPositionShift(player.position, verdict.positionShift),
+  };
+  boss = {
+    ...boss,
+    position: applyPositionShift(boss.position, verdict.bossPositionShift),
+  };
 
   const traitReveal = revealTrait(boss, verdict.hiddenTraitRevealed);
   boss = traitReveal.entity;
@@ -215,19 +357,54 @@ export function applyResolvedVerdict(
 
   const ledgers = applyLedgerMutations(state.ledgers, verdict.ledgerMutations);
 
-  let battlefield = [...state.world.battlefield];
-  for (const r of verdict.battlefieldMutations.remove) {
-    battlefield = battlefield.filter((x) => x !== r);
-  }
-  for (const a of verdict.battlefieldMutations.add) {
-    if (battlefield.includes(a)) continue;
-    if (isNearDuplicateLabel(a, battlefield)) continue;
-    battlefield.push(a);
+  // Beliefs from observables only — then check expectation breaks.
+  let beliefs = updateBeliefsFromSignals(
+    {
+      ...state,
+      player,
+      boss,
+      ledgers,
+      world,
+    },
+    verdict.observableSignals,
+    playerParsed,
+  );
+  const revised = reviseBeliefsOnContradiction(
+    beliefs,
+    playerParsed,
+    state.bossAgenda.commitment?.purpose,
+  );
+  beliefs = revised.beliefs;
+  let expectationBreak = revised.expectationBreak ?? verdict.expectationBreak;
+  if (expectationBreak) {
+    boss = applyDeltas(boss, 0, -8);
+    player = {
+      ...player,
+    };
   }
 
-  let world = {
-    ...state.world,
-    battlefield,
+  // World thresholds from accumulated causal state.
+  world = evaluateWorldThresholds(
+    world,
+    verdict.causalEvents.map((e) => e.narrative),
+  );
+
+  const tempo = shapeTempo(state.tempo, {
+    playerOutcome: verdict.playerOutcome,
+    bossOutcome: verdict.bossOutcome,
+    playerRelation: verdict.playerRelation,
+    bossRelation: verdict.bossRelation,
+    threadTimer: workingThread?.timer,
+    thresholdProgress: world.thresholds.find((t) => !t.triggered)?.progress,
+    signatureUsed: !!judgment?.signatureMomentId ||
+      state.bossAgenda.commitment?.posture === 'signature',
+    transformation: !!world.lastTransformation &&
+      world.lastTransformation !== state.world.lastTransformation,
+    expectationBreak: !!expectationBreak,
+  });
+
+  world = {
+    ...world,
     initiative:
       verdict.initiativeWinner === 'none'
         ? state.world.initiative
@@ -238,16 +415,47 @@ export function applyResolvedVerdict(
     realityPressure: recalculateRealityPressure(world, player, boss),
   };
 
-  const bossAgenda = updateBossAgenda(
-    state.bossAgenda,
-    { ...state, player, boss, ledgers, world },
-    verdict.bossOutcome,
+  const emotionalTriggers = collectEmotionalTriggers(
+    state,
+    verdict,
+    judgment,
+  ).map((t) =>
+    judgment?.signatureMomentId && !t.spent
+      ? { ...t, spent: true }
+      : t,
   );
 
-  const winner = checkWinner(player, boss);
-  const logLine = `R${state.round}: You [${verdict.playerOutcome}] vs Boss [${verdict.bossOutcome}] | ΔBody P${verdict.playerBodyDelta}/B${verdict.bossBodyDelta} ΔResolve P${verdict.playerResolveDelta}/B${verdict.bossResolveDelta}`;
+  let bossAgenda = updateBossAgenda(
+    {
+      ...state.bossAgenda,
+      beliefs,
+      emotionalTriggers,
+    },
+    { ...state, player, boss, ledgers, world, tacticalThread: workingThread },
+    verdict.bossOutcome,
+    {
+      posture: state.bossAgenda.commitment?.posture,
+      signatureId:
+        judgment?.signatureMomentId ??
+        state.bossAgenda.commitment?.signatureId,
+      failedMethod:
+        verdict.bossOutcome === 'failure' || verdict.bossOutcome === 'backfire'
+          ? state.bossAgenda.commitment?.method
+          : undefined,
+      unavailable:
+        verdict.bossRelation === 'break'
+          ? [state.bossAgenda.commitment?.method ?? ''].filter(Boolean)
+          : undefined,
+    },
+  );
 
-  return {
+  const discoveries = [
+    ...state.discoveries,
+    ...verdict.discoveries,
+    ...(experiment.discovery ? [experiment.discovery] : []),
+  ].slice(-12);
+
+  let nextState: GameState = {
     ...state,
     round: state.round + 1,
     player,
@@ -255,11 +463,50 @@ export function applyResolvedVerdict(
     ledgers,
     world,
     bossAgenda,
-    activeThreat: workingThreat,
-    winner,
-    log: [...state.log, logLine].slice(-20),
+    tacticalThread:
+      workingThread &&
+      (workingThread.status === 'spent' || workingThread.status === 'broken')
+        ? undefined
+        : workingThread,
+    activeThreat: threadToThreat(
+      workingThread &&
+        workingThread.status !== 'spent' &&
+        workingThread.status !== 'broken'
+        ? workingThread
+        : undefined,
+    ),
+    tempo,
+    temptation: undefined,
+    discoveries,
+    lastCausalEvents: verdict.causalEvents,
+    lastExpectationBreak: expectationBreak,
+    winner: checkWinner(player, boss),
+    log: [
+      ...state.log,
+      `R${state.round}: You [${verdict.playerOutcome}/${verdict.playerRelation}] vs Boss [${verdict.bossOutcome}/${verdict.bossRelation}] · tempo=${tempo.beat}`,
+    ].slice(-20),
     matchLog: state.matchLog,
   };
+
+  nextState.temptation = detectTemptation(nextState) ?? tickTemptation(state.temptation);
+
+  // Recommit for the next round from sanitized observation — no private player aim.
+  const observation = buildBossObservation(
+    nextState,
+    verdict.observableSignals,
+  );
+  const nextCommitment = buildCommitmentFromObservation(nextState, observation);
+  nextState = {
+    ...nextState,
+    bossAgenda: {
+      ...nextState.bossAgenda,
+      nextCommitment,
+      commitment: nextCommitment,
+      posture: nextCommitment.posture,
+    },
+  };
+
+  return nextState;
 }
 
 export function appendMatchLog(
@@ -304,6 +551,8 @@ export function resolveWithMock(
   bossParsed: ParsedIntent,
 ): { judgment: ArbiterJudgment; verdict: ResolvedVerdict; next: GameState } {
   const judgment = mockJudgment(playerParsed, bossParsed, state);
+  // Force judgment bossIntent to the precommitted text.
+  judgment.bossIntent = bossParsed.intent.raw;
   const { verdict, next } = resolveWithJudgment(
     state,
     judgment,

@@ -8,17 +8,21 @@ import {
 } from '../config/gameConfig';
 import type {
   ArbiterJudgment,
+  CausalEvent,
   GameState,
   ParsedIntent,
+  PlanRelation,
   ResolvedVerdict,
   ResolutionOutcome,
 } from '../types';
 import { explainDamage } from './damageWhy';
+import { isInvestigative } from './discoveries';
+import { extractObservableSignals } from './beliefs';
 import { isAnchoredOnFacts } from './ledgers';
 import { traitExploitBonus } from './hiddenTraits';
 import { nextInitiative, shouldGainInitiative } from './initiative';
 import { positionPlausibilityHint } from './positioning';
-import { playerAddressesThreat } from './threats';
+import { playerAimsAtThread } from './threats';
 import { realityDistortionMultiplier } from './vitality';
 
 function clamp01(n: number): number {
@@ -78,13 +82,17 @@ function damageFrom(
 ): number {
   if (backfire) {
     const hit =
-      against === 'body' ? BASE_BODY_HIT * 0.4 : BASE_RESOLVE_HIT * BACKFIRE_RESOLVE_MULTIPLIER;
+      against === 'body'
+        ? BASE_BODY_HIT * 0.4
+        : BASE_RESOLVE_HIT * BACKFIRE_RESOLVE_MULTIPLIER;
     return -hit;
   }
   const scale = outcomeScale(outcome) * plausibility;
   if (scale <= 0.05) return 0;
   if (category === 'SETUP' || category === 'MANIPULATION') {
-    return against === 'resolve' ? -SETUP_RESOLVE_PRESSURE * scale * 1.4 : -BASE_BODY_HIT * 0.2 * scale;
+    return against === 'resolve'
+      ? -SETUP_RESOLVE_PRESSURE * scale * 1.4
+      : -BASE_BODY_HIT * 0.2 * scale;
   }
   if (category === 'DEFENSE' || category === 'UTILITY') {
     return against === 'resolve' ? -SETUP_RESOLVE_PRESSURE * 0.3 * scale : 0;
@@ -92,6 +100,69 @@ function damageFrom(
   return against === 'body'
     ? -BASE_BODY_HIT * scale
     : -BASE_RESOLVE_HIT * 0.6 * scale;
+}
+
+function inferRelation(
+  outcome: ResolutionOutcome,
+  judgmentRelation: PlanRelation | undefined,
+  aimedAtThread: boolean,
+  transfer?: boolean,
+): PlanRelation {
+  if (judgmentRelation && judgmentRelation !== 'none') return judgmentRelation;
+  if (transfer) return 'transfer';
+  if (outcome === 'success' && aimedAtThread) return 'break';
+  if (outcome === 'success') return 'advance';
+  if (outcome === 'partial') return 'stall';
+  if (outcome === 'backfire') return 'break';
+  return 'none';
+}
+
+function buildCausalEvents(
+  judgment: ArbiterJudgment,
+  playerParsed: ParsedIntent,
+  bossParsed: ParsedIntent,
+  playerRelation: PlanRelation,
+  bossRelation: PlanRelation,
+): CausalEvent[] {
+  if (judgment.causalEvents?.length) {
+    return judgment.causalEvents.map((e, i) => ({
+      id: `ce-${i}`,
+      actor: e.actor,
+      method: e.method,
+      target: e.target,
+      fromState: e.fromState ?? 'prior',
+      toState: e.toState ?? 'changed',
+      relation: e.relation ?? 'none',
+      narrative: e.narrative,
+    }));
+  }
+
+  const events: CausalEvent[] = [];
+  if (judgment.playerOutcome !== 'failure') {
+    events.push({
+      id: 'ce-player',
+      actor: 'player',
+      method: playerParsed.intent.raw.slice(0, 80),
+      target: playerParsed.intent.target.toLowerCase(),
+      fromState: 'attempt',
+      toState: judgment.playerOutcome,
+      relation: playerRelation,
+      narrative: `Your ${playerParsed.intent.category.toLowerCase()} ${judgment.playerOutcome}.`,
+    });
+  }
+  if (judgment.bossOutcome !== 'failure') {
+    events.push({
+      id: 'ce-boss',
+      actor: 'boss',
+      method: bossParsed.intent.raw.slice(0, 80),
+      target: bossParsed.intent.target.toLowerCase(),
+      fromState: 'commitment',
+      toState: judgment.bossOutcome,
+      relation: bossRelation,
+      narrative: `Boss ${judgment.bossOutcome}: ${bossParsed.intent.raw.slice(0, 90)}`,
+    });
+  }
+  return events;
 }
 
 export function resolveJudgment(
@@ -116,7 +187,6 @@ export function resolveJudgment(
   let playerOutcome = judgment.playerOutcome;
   let bossOutcome = judgment.bossOutcome;
 
-  // Contested yellow assumptions -> backfire weight on initiator
   const contested = new Set(judgment.contestedAssumptions);
   const playerUsesAssumption = state.ledgers.assumptions.some(
     (a) =>
@@ -127,6 +197,29 @@ export function resolveJudgment(
     playerOutcome = 'backfire';
   }
 
+  const aimed = playerAimsAtThread(
+    playerParsed.intent.raw,
+    state.tacticalThread ?? null,
+  );
+  // Mention alone never clears — need success/partial + break/reverse/transfer.
+  const causalClear =
+    judgment.clearThreat === true &&
+    (playerOutcome === 'success' || playerOutcome === 'partial') &&
+    aimed;
+
+  const playerRelation = inferRelation(
+    playerOutcome,
+    judgment.playerRelation,
+    aimed && causalClear,
+    !!judgment.threadTransferTo && judgment.threadTransferTo === 'player',
+  );
+  const bossRelation = inferRelation(
+    bossOutcome,
+    judgment.bossRelation,
+    false,
+    false,
+  );
+
   const playerBackfire = playerOutcome === 'backfire';
   const bossBackfire = bossOutcome === 'backfire';
 
@@ -135,9 +228,14 @@ export function resolveJudgment(
   let bossBodyDelta = 0;
   let bossResolveDelta = 0;
 
-  // Simultaneous: each successful attack hits the other; backfire hits initiator
   if (playerBackfire) {
-    playerBodyDelta += damageFrom(playerOutcome, playerP, playerParsed.intent.category, true, 'body');
+    playerBodyDelta += damageFrom(
+      playerOutcome,
+      playerP,
+      playerParsed.intent.category,
+      true,
+      'body',
+    );
     playerResolveDelta += damageFrom(
       playerOutcome,
       playerP,
@@ -163,7 +261,13 @@ export function resolveJudgment(
   }
 
   if (bossBackfire) {
-    bossBodyDelta += damageFrom(bossOutcome, bossP, bossParsed.intent.category, true, 'body');
+    bossBodyDelta += damageFrom(
+      bossOutcome,
+      bossP,
+      bossParsed.intent.category,
+      true,
+      'body',
+    );
     bossResolveDelta += damageFrom(
       bossOutcome,
       bossP,
@@ -188,24 +292,29 @@ export function resolveJudgment(
     );
   }
 
-  // Dilemma pressure: unanswered threats hurt Resolve harder; answering them softens.
-  const addressed = playerAddressesThreat(
-    playerParsed.intent.raw,
-    state.activeThreat ?? null,
-  );
+  // Dilemma pressure: unanswered armed threads hurt; aiming without causal success does not clear.
   let threatNote: string | undefined;
-  if (state.activeThreat && !addressed && bossOutcome !== 'failure') {
+  const thread = state.tacticalThread;
+  if (
+    thread &&
+    thread.status !== 'broken' &&
+    thread.status !== 'reversed' &&
+    !causalClear &&
+    bossOutcome !== 'failure'
+  ) {
     playerResolveDelta -= 4;
-    if (state.activeThreat.tension === 'crisis') {
+    if (thread.tension === 'crisis' || thread.timer <= 1) {
       playerBodyDelta -= 3;
       playerResolveDelta -= 4;
     }
-    threatNote = `Active threat unanswered: ${state.activeThreat.label}.`;
-  } else if (state.activeThreat && addressed) {
-    threatNote = `You answered the threat: ${state.activeThreat.label}.`;
+    threatNote = `Active thread unanswered: ${thread.label} — ${thread.payoff}`;
+  } else if (causalClear && thread) {
+    threatNote = `You broke the prepared line: ${thread.label}.`;
+    bossResolveDelta -= 5;
   }
 
-  // Uncontested yellow assumptions that were acted on may harden
+  // Expectation-break Resolve pressure applied later in gameLoop when detected.
+
   const hardenAssumptions = state.ledgers.assumptions.filter(
     (a) =>
       !contested.has(a) &&
@@ -213,6 +322,16 @@ export function resolveJudgment(
       (playerParsed.intent.raw.toLowerCase().includes(a.toLowerCase().slice(0, 10)) ||
         bossParsed.intent.raw.toLowerCase().includes(a.toLowerCase().slice(0, 10))),
   );
+
+  const awarenessTarget =
+    judgment.awarenessTarget ??
+    (playerParsed.intent.category === 'MANIPULATION' ? 'boss' : 'boss');
+
+  const controlChange =
+    playerRelation === 'transfer' ||
+    playerRelation === 'reverse' ||
+    causalClear ||
+    judgment.signatureMomentId;
 
   const playerGains = shouldGainInitiative(
     playerOutcome,
@@ -224,14 +343,36 @@ export function resolveJudgment(
   const bossGains = shouldGainInitiative(bossOutcome, state.player.awareness);
   const initiativeWinner = nextInitiative(
     state.world.initiative,
-    playerGains && playerOutcome === 'success',
-    bossGains && bossOutcome === 'success',
+    (playerGains && playerOutcome === 'success') || !!controlChange,
+    bossGains && bossOutcome === 'success' && !controlChange,
   );
+
+  const causalEvents = buildCausalEvents(
+    judgment,
+    playerParsed,
+    bossParsed,
+    playerRelation,
+    bossRelation,
+  );
+
+  // Zero-damage unless a causal event exists that can justify it.
+  if (!causalEvents.length) {
+    playerBodyDelta = 0;
+    playerResolveDelta = 0;
+    bossBodyDelta = 0;
+    bossResolveDelta = 0;
+  }
+
+  const signals =
+    judgment.observableSignals?.length
+      ? judgment.observableSignals
+      : extractObservableSignals(playerParsed, playerOutcome);
 
   const pBody = Math.round(playerBodyDelta * 10) / 10;
   const pRes = Math.round(playerResolveDelta * 10) / 10;
   const bBody = Math.round(bossBodyDelta * 10) / 10;
   const bRes = Math.round(bossResolveDelta * 10) / 10;
+
   const why = explainDamage({
     playerParsed,
     bossParsed,
@@ -242,6 +383,8 @@ export function resolveJudgment(
     bossBodyDelta: bBody,
     bossResolveDelta: bRes,
     threatNote,
+    causalEvents,
+    fieldNames: state.world.fieldElements.map((e) => e.name),
   });
 
   return {
@@ -254,7 +397,9 @@ export function resolveJudgment(
     bossBodyDelta: bBody,
     bossResolveDelta: bRes,
     targetAwarenessShift: judgment.targetAwarenessShift,
+    awarenessTarget,
     positionShift: judgment.positionShift,
+    bossPositionShift: judgment.bossPositionShift ?? 'none',
     initiativeWinner,
     hiddenTraitRevealed: judgment.hiddenTraitHint,
     ledgerMutations: {
@@ -269,8 +414,15 @@ export function resolveJudgment(
     },
     playerOutcome,
     bossOutcome,
+    playerRelation,
+    bossRelation,
+    causalEvents,
+    discoveries: judgment.discoveries ?? [],
+    observableSignals: signals,
     damageWhyPlayer: judgment.damageWhy?.trim() || why.player,
     damageWhyBoss: why.boss,
+    threadCleared: causalClear,
+    threadTransferredTo: judgment.threadTransferTo ?? undefined,
   };
 }
 
@@ -282,51 +434,116 @@ export function mockJudgment(
 ): ArbiterJudgment {
   const playerP = playerParsed.rejected
     ? 0.1
-    : Math.max(0.35, 0.85 - playerParsed.complexity.total * 0.05 - playerParsed.fatiguePenalty);
+    : Math.max(
+        0.35,
+        0.85 - playerParsed.complexity.total * 0.05 - playerParsed.fatiguePenalty,
+      );
   const bossP = Math.max(0.4, 0.8 - bossParsed.complexity.total * 0.04);
 
+  // Avoid defaulting everything to partial — use clearer bands.
   const playerOutcome: ResolutionOutcome =
-    playerP > 0.7 ? 'success' : playerP > 0.45 ? 'partial' : playerP > 0.25 ? 'failure' : 'backfire';
+    playerP > 0.72
+      ? 'success'
+      : playerP > 0.5
+        ? 'partial'
+        : playerP > 0.28
+          ? 'failure'
+          : 'backfire';
   const bossOutcome: ResolutionOutcome =
-    bossP > 0.7 ? 'success' : bossP > 0.45 ? 'partial' : 'failure';
+    bossP > 0.72 ? 'success' : bossP > 0.48 ? 'partial' : 'failure';
 
   const suggestedFacts: string[] = [];
   const battlefieldAdd: string[] = [];
   if (playerParsed.intent.category === 'SETUP' && playerOutcome !== 'failure') {
     suggestedFacts.push(`✔ ${playerParsed.intent.raw.slice(0, 48)}`);
+    const snippet = playerParsed.intent.raw.match(
+      /\b(smoke|water|chain|wire|mirror|oil|ember|barricade)\b/i,
+    );
+    if (snippet) battlefieldAdd.push(snippet[0]!);
   }
 
-  const objects = state?.world.battlefield[2] ?? 'Railing';
+  const objects =
+    state?.world.fieldElements.find((e) =>
+      e.knownProperties.includes('objects'),
+    )?.name ??
+    state?.world.battlefield[2] ??
+    'Railing';
+
   const threatLabel =
     bossOutcome === 'failure'
       ? null
       : {
-          label: `Damaged ${objects}`,
+          label: state?.tacticalThread?.label ?? `Damaged ${objects}`,
           foreshadow:
+            state?.tacticalThread?.foreshadow ??
             'The metal groans. Rust flakes fall as the span begins to bend.',
-          timer: 3,
+          timer: state?.tacticalThread
+            ? Math.max(1, state.tacticalThread.timer - (bossOutcome === 'success' ? 1 : 0))
+            : 3,
+          purpose: state?.tacticalThread?.purpose ?? 'Collapse a support',
+          payoff: state?.tacticalThread?.payoff ?? 'Support fails into your lane',
         };
 
-  const addressed = state
-    ? playerAddressesThreat(playerParsed.intent.raw, state.activeThreat ?? null)
+  const aimed = state
+    ? playerAimsAtThread(playerParsed.intent.raw, state.tacticalThread ?? null)
     : false;
+  const investigative =
+    playerParsed.investigative ||
+    isInvestigative(playerParsed.intent.raw, playerParsed.intent.category);
+
+  const discoveries = investigative
+    ? [
+        {
+          stimulus: playerParsed.intent.raw.slice(0, 80),
+          finding:
+            playerOutcome === 'failure'
+              ? `${objects} does not react to that stimulus.`
+              : `${objects} answers under the probe — a limit becomes visible.`,
+          property:
+            playerOutcome === 'failure'
+              ? `inert to probe`
+              : 'fails under sustained load',
+        },
+      ]
+    : [];
+
+  // Investigation never clears by itself.
+  const clearThreat =
+    aimed &&
+    !investigative &&
+    (playerOutcome === 'success' || playerOutcome === 'partial') &&
+    /\b(cut|break|stop|disarm|sever|smash|collapse|interrupt)\b/i.test(
+      playerParsed.intent.raw,
+    );
+
+  const signals = extractObservableSignals(playerParsed, playerOutcome);
 
   return {
     playerPlausibility: playerP,
     bossPlausibility: bossP,
     playerOutcome,
     bossOutcome,
+    playerRelation: clearThreat
+      ? 'break'
+      : playerOutcome === 'success'
+        ? 'advance'
+        : playerOutcome === 'partial'
+          ? 'stall'
+          : 'none',
+    bossRelation: bossOutcome === 'success' ? 'advance' : 'stall',
     contestedAssumptions: [],
     targetAwarenessShift:
       playerParsed.intent.category === 'MANIPULATION' && playerOutcome === 'success'
         ? 'degrade'
         : 'none',
+    awarenessTarget: 'boss',
     positionShift:
       playerParsed.intent.category === 'UTILITY'
-        ? 'closer'
-        : bossParsed.intent.category === 'UTILITY'
+        ? /\b(retreat|back|away)\b/i.test(playerParsed.intent.raw)
           ? 'farther'
-          : 'none',
+          : 'closer'
+        : 'none',
+    bossPositionShift: bossParsed.intent.category === 'UTILITY' ? 'closer' : 'none',
     hiddenTraitHint: '',
     suggestedFacts,
     suggestedAssumptions:
@@ -334,14 +551,35 @@ export function mockJudgment(
         ? [`? Opponent is unsettled by the maneuver`]
         : [],
     battlefieldAdd,
-    battlefieldRemove: [],
+    battlefieldRemove: clearThreat ? [] : [],
+    causalEvents: [
+      {
+        actor: 'boss',
+        method: bossParsed.intent.raw.slice(0, 80),
+        target: objects,
+        narrative: `Boss commits with tool: ${bossParsed.intent.raw.slice(0, 90)}`,
+        relation: bossOutcome === 'success' ? 'advance' : 'stall',
+      },
+      {
+        actor: 'player',
+        method: playerParsed.intent.raw.slice(0, 80),
+        target: 'field',
+        narrative: `Player attempt ${playerOutcome}.`,
+        relation: clearThreat ? 'break' : 'advance',
+      },
+    ],
+    discoveries,
+    observableSignals: signals,
     judgmentNarrative: [
       `• Boss commits: ${bossParsed.intent.raw.slice(0, 90)}`,
       `• Your attempt ${playerOutcome}; theirs ${bossOutcome}`,
       threatLabel
-        ? `• New pressure: ${threatLabel.label}`
+        ? `• Field pressure: ${threatLabel.label}`
         : '• Boss pressure stalls this beat',
-    ].join('\n'),
+      discoveries[0] ? `• Discovery: ${discoveries[0].finding}` : '',
+    ]
+      .filter(Boolean)
+      .join('\n'),
     bossReaction: bossParsed.intent.raw.slice(0, 120),
     bossIntent: bossParsed.intent.raw,
     damageWhy: '',
@@ -352,6 +590,6 @@ export function mockJudgment(
         ]
       : ['The arena holds still — for now.'],
     activeThreat: threatLabel,
-    clearThreat: addressed,
+    clearThreat,
   };
 }

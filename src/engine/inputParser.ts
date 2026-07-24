@@ -10,6 +10,7 @@ import type {
   ParsedIntent,
 } from '../types';
 import { evaluateComplexity, scaleDownText } from './complexityBudget';
+import { isInvestigative } from './discoveries';
 import { extractConcepts, fatiguePenalty } from './wordFatigue';
 
 function countActionVerbs(raw: string): number {
@@ -90,8 +91,12 @@ export function parseIntent(raw: string, entity: EntityState): ParsedIntent {
   let scaledDown = false;
   const verbCount = countActionVerbs(text);
   if (verbCount > 3) {
+    // Preserve the first clause rather than replacing authorship entirely.
+    const first = trimmed.split(/,| then | and then /i)[0]?.trim();
     text =
-      'I close the distance to overwhelm the opponent with disciplined close-range pressure.';
+      first && first.length > 12
+        ? first
+        : 'I commit to one clear tactical pressure instead of a verb stack.';
     scaledDown = true;
   }
 
@@ -103,15 +108,17 @@ export function parseIntent(raw: string, entity: EntityState): ParsedIntent {
   }
 
   const concepts = extractConcepts(text);
+  const category = classifyCategory(text);
   return {
     intent: {
       raw: text,
-      category: classifyCategory(text),
+      category,
       target: classifyTarget(text),
     },
     complexity,
     concepts,
     scaledDown,
     fatiguePenalty: fatiguePenalty(entity, concepts),
+    investigative: isInvestigative(text, category),
   };
 }
