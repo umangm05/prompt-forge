@@ -10,6 +10,7 @@ import { avatarPlate, speechBubble } from './avatars';
 import { ALL_BOSSES, BOSS_META } from './bossMeta';
 import { buildArenaCards, cardTone } from './cards';
 import { GAME_TIPS } from './tips';
+import { renderMoreFromUs } from './moreFromUs';
 
 /** Kill browser autofill / password-manager icons on our fields. */
 const NO_FILL =
@@ -236,6 +237,7 @@ function renderSetup(opts: {
           </div>
         </section>
       </div>
+      ${renderMoreFromUs()}
     </div>
   </div>`;
 }
