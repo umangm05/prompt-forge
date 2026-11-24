@@ -1,8 +1,9 @@
 // Shared "More from us" links (decision D-HELPER-SITES-CROSSLINK): every helper
-// site links to the others. Tiny Worlds 3D is added once its URL exists.
+// site links to the others.
 export const MORE_FROM_US: ReadonlyArray<{ name: string; url: string; blurb: string }> = [
   { name: 'Utility Helpers', url: 'https://utility-helpers.netlify.app/', blurb: 'free private browser tools' },
   { name: 'Auto Crash Chase', url: 'https://auto-crash-chase.netlify.app/', blurb: 'top-down AI car-chase game' },
+  { name: 'Tiny Worlds 3D', url: 'https://3d-world.umangmittal.me/', blurb: 'tiny 3D worlds you can play in your browser' },
 ];
 
 export function renderMoreFromUs(): string {
